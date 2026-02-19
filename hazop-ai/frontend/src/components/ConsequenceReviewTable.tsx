@@ -449,9 +449,15 @@ export default function ConsequenceReviewTable({
                             </span>
                             <span className="font-medium text-gray-900 leading-snug">{dev.deviation}</span>
                             <span className="text-gray-400 text-[10px]">{dev.equipment_tag}</span>
-                            {dev.overpressure_calc?.exceeds_2x && (
-                              <span className="text-[10px] bg-amber-100 text-amber-700 border border-amber-300 rounded px-1.5 py-0.5 self-start font-semibold">
-                                ⚠ Vessel Rupture ({dev.overpressure_calc.ratio.toFixed(2)}×)
+                            {dev.overpressure_calc?.assumed_leak_size && (
+                              <span className={`text-[10px] rounded px-1.5 py-0.5 self-start font-semibold border ${
+                                dev.overpressure_calc.exceeds_2x
+                                  ? "bg-amber-100 text-amber-700 border-amber-300"
+                                  : "bg-yellow-50 text-yellow-700 border-yellow-300"
+                              }`}>
+                                {dev.overpressure_calc.exceeds_2x ? "⚠ " : ""}
+                                {dev.overpressure_calc.assumed_leak_size} leak
+                                {" "}({dev.overpressure_calc.ratio.toFixed(2)}×)
                               </span>
                             )}
                           </div>
@@ -726,25 +732,54 @@ function ApprovalSection({
 // ---------------------------------------------------------------------------
 
 function OverpressureBadge({ calc }: { calc: OverpressureCalc }) {
+  // Colour: vessel rupture → amber, any leak size → yellow, no LOPC → gray
+  const hasLeak = !!calc.assumed_leak_size;
+  const containerCls = calc.exceeds_2x
+    ? "bg-amber-50 border border-amber-300"
+    : hasLeak
+    ? "bg-yellow-50 border border-yellow-200"
+    : "bg-gray-50 border border-gray-200";
+  const labelCls = calc.exceeds_2x
+    ? "bg-amber-500 text-white"
+    : hasLeak
+    ? "bg-yellow-400 text-yellow-900"
+    : "bg-gray-400 text-white";
+  const label = calc.exceeds_2x
+    ? "⚠ VESSEL RUPTURE"
+    : hasLeak
+    ? "PRESSURIZED LEAK"
+    : "OVERPRESSURE";
+
   return (
-    <div className={`rounded-md p-3 text-xs space-y-1 ${calc.exceeds_2x ? "bg-amber-50 border border-amber-300" : "bg-gray-50 border border-gray-200"}`}>
-      <div className="flex items-center gap-2 font-semibold">
-        <span className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${calc.exceeds_2x ? "bg-amber-500 text-white" : "bg-gray-400 text-white"}`}>
-          {calc.exceeds_2x ? "⚠ VESSEL RUPTURE" : "OVERPRESSURE"}
+    <div className={`rounded-md p-3 text-xs space-y-1.5 ${containerCls}`}>
+      {/* Ratio line */}
+      <div className="flex items-center gap-2 font-semibold flex-wrap">
+        <span className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${labelCls}`}>
+          {label}
         </span>
         <span className="text-gray-700">
-          Max Credible: {calc.max_credible_pressure} PSIG ÷ Design: {calc.design_pressure} PSIG = {calc.ratio.toFixed(2)}×
+          {calc.max_credible_pressure} PSIG ÷ {calc.design_pressure} PSIG (design) = {calc.ratio.toFixed(2)}×
         </span>
       </div>
-      {calc.exceeds_2x && (
-        <>
-          <div className="text-amber-800 font-medium">
-            Ratio {">"} 2.0 → {calc.assumed_leak_size} leak assumed
-          </div>
-          {calc.source && (
-            <div className="text-gray-500 italic">Source: {calc.source}</div>
+
+      {/* Significance from knowledge document */}
+      {calc.significance && (
+        <div className="text-gray-600">{calc.significance}</div>
+      )}
+
+      {/* Consequence description + hole size from knowledge document */}
+      {calc.consequence_description && (
+        <div className={`font-medium ${calc.exceeds_2x ? "text-amber-800" : "text-yellow-800"}`}>
+          {calc.consequence_description}
+          {calc.assumed_leak_size && (
+            <span className="ml-2 font-bold">→ {calc.assumed_leak_size} assumed leak</span>
           )}
-        </>
+        </div>
+      )}
+
+      {/* Source reference */}
+      {calc.source && (
+        <div className="text-gray-400 italic text-[10px]">Source: {calc.source}</div>
       )}
     </div>
   );

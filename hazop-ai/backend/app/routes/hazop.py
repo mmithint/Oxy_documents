@@ -388,22 +388,19 @@ async def generate_consequences(request: GenerateConsequencesRequest):
         if not causes:
             causes = dev.causes  # fall back to ontology causes
 
-        # Overpressure calculation for High Pressure deviations
-        overpressure_calc: OverpressureCalc | None = None
+        # Calculate pressure ratio (pure math) — thresholds and hole sizes come from RAG
+        pressure_ratio: float | None = None
+        overpressure_table_context = ""
         if (dev.guideword.value == "HIGH"
                 and dev.parameter.value == "PRESSURE"
                 and design_pressure
                 and node.upstream_pressure_psig):
-            ratio = node.upstream_pressure_psig / design_pressure
-            exceeds_2x = ratio > 2.0
-            overpressure_calc = OverpressureCalc(
-                max_credible_pressure=node.upstream_pressure_psig,
-                design_pressure=design_pressure,
-                ratio=round(ratio, 2),
-                exceeds_2x=exceeds_2x,
-                assumed_leak_size="6 inch" if exceeds_2x else None,
-                source="Consequence Document, Page 14" if exceeds_2x else None,
-            )
+            pressure_ratio = round(node.upstream_pressure_psig / design_pressure, 2)
+            # Retrieve the pressure significance / hole size table from knowledge documents
+            try:
+                overpressure_table_context = await knowledge_service.retrieve_overpressure_table_context()
+            except Exception:
+                pass
 
         # RAG: retrieve consequence knowledge context
         knowledge_context = ""
@@ -427,10 +424,26 @@ async def generate_consequences(request: GenerateConsequencesRequest):
                 upstream_pressure_psig=node.upstream_pressure_psig,
                 design_temperature=design_temperature,
                 approved_causes=causes,
-                overpressure_calc=overpressure_calc.model_dump() if overpressure_calc else None,
+                pressure_ratio=pressure_ratio,
+                overpressure_table_context=overpressure_table_context or None,
                 knowledge_context=knowledge_context if knowledge_context else None,
                 is_special_category=dev.requires_mandatory_sme_review,
             )
+
+            # Build OverpressureCalc from LLM's table lookup result
+            overpressure_calc: OverpressureCalc | None = None
+            if pressure_ratio is not None and design_pressure and node.upstream_pressure_psig:
+                op = result.get("overpressure_result") or {}
+                overpressure_calc = OverpressureCalc(
+                    max_credible_pressure=node.upstream_pressure_psig,
+                    design_pressure=design_pressure,
+                    ratio=pressure_ratio,
+                    exceeds_2x=bool(op.get("is_vessel_rupture", False)),
+                    assumed_leak_size=op.get("hole_size"),
+                    significance=op.get("significance"),
+                    consequence_description=op.get("consequence_description"),
+                    source=op.get("source"),
+                )
 
             # Drawing references from node
             drawing_refs = ([node.drawing_number] if getattr(node, "drawing_number", None) else
@@ -452,7 +465,19 @@ async def generate_consequences(request: GenerateConsequencesRequest):
                 overpressure_calc=overpressure_calc,
             ))
         except Exception:
-            # LLM failure: return empty consequence fields for SME to fill
+            # LLM failure: return ratio-only overpressure calc for SME to review
+            fallback_calc: OverpressureCalc | None = None
+            if pressure_ratio is not None and design_pressure and node.upstream_pressure_psig:
+                fallback_calc = OverpressureCalc(
+                    max_credible_pressure=node.upstream_pressure_psig,
+                    design_pressure=design_pressure,
+                    ratio=pressure_ratio,
+                    exceeds_2x=False,
+                    assumed_leak_size=None,
+                    significance=None,
+                    consequence_description=None,
+                    source=None,
+                )
             deviation_consequences_list.append(DeviationConsequencesItem(
                 deviation_id=dev.deviation_id,
                 equipment_tag=dev.equipment_tag,
@@ -461,7 +486,7 @@ async def generate_consequences(request: GenerateConsequencesRequest):
                 parameter=dev.parameter.value,
                 causes=causes,
                 drawing_references=[node.drawing_number] if getattr(node, "drawing_number", None) else [],
-                overpressure_calc=overpressure_calc,
+                overpressure_calc=fallback_calc,
             ))
 
     # Store pending consequences on node for later retrieval

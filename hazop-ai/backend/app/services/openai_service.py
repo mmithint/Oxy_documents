@@ -397,7 +397,8 @@ Rules:
         upstream_pressure_psig: float | None = None,
         design_temperature: float | None = None,
         approved_causes: list[str] | None = None,
-        overpressure_calc: dict | None = None,
+        pressure_ratio: float | None = None,
+        overpressure_table_context: str | None = None,
         knowledge_context: str | None = None,
         is_special_category: bool = False,
         node_instruments: list[dict] | None = None,
@@ -427,7 +428,8 @@ Rules:
             upstream_pressure_psig=upstream_pressure_psig,
             design_temperature=design_temperature,
             approved_causes=approved_causes,
-            overpressure_calc=overpressure_calc,
+            pressure_ratio=pressure_ratio,
+            overpressure_table_context=overpressure_table_context,
             knowledge_context=knowledge_context,
             is_special_category=is_special_category,
             node_instruments=node_instruments,
@@ -474,7 +476,8 @@ Rules:
         upstream_pressure_psig: float | None,
         design_temperature: float | None,
         approved_causes: list[str] | None,
-        overpressure_calc: dict | None,
+        pressure_ratio: float | None,
+        overpressure_table_context: str | None,
         knowledge_context: str | None,
         is_special_category: bool,
         node_instruments: list[dict] | None,
@@ -496,30 +499,41 @@ Deviation: {deviation}
             prompt += f"Design Temperature: {design_temperature} °F\n"
 
         if approved_causes:
-            prompt += f"\nSME-Approved Causes:\n"
+            prompt += "\nSME-Approved Causes:\n"
             for c in approved_causes:
                 prompt += f"  - {c}\n"
 
-        # Overpressure calculation context
-        if overpressure_calc:
-            ratio = overpressure_calc.get("ratio", 0)
-            exceeds = overpressure_calc.get("exceeds_2x", False)
-            max_p = overpressure_calc.get("max_credible_pressure", 0)
-            design_p = overpressure_calc.get("design_pressure", 0)
+        # Overpressure table lookup — ratio is calculated in Python; thresholds come from RAG
+        if pressure_ratio is not None:
             prompt += f"""
-OVERPRESSURE ANALYSIS:
-  Maximum Credible Pressure: {max_p} PSIG
-  Design Pressure: {design_p} PSIG
-  Overpressure Ratio: {ratio:.2f}×
+OVERPRESSURE CALCULATION:
+  Maximum Credible Pressure (upstream): {upstream_pressure_psig} PSIG
+  Equipment Design Pressure: {design_pressure} PSIG
+  Calculated Ratio: {pressure_ratio:.2f}× (max_credible ÷ design_pressure)
+
 """
-            if exceeds:
-                prompt += """  RESULT: Overpressure exceeds 2× design pressure.
-  Per Consequence Document Page 14: This is assumed to result in VESSEL RUPTURE (6-inch leak).
-  You MUST include vessel rupture and 6-inch leak in intermediate_consequences and consequences.
-  Per Consequence Document Page 8: Include jet fire as an escalation consequence in scenario_comments.
-"""
+            if overpressure_table_context:
+                prompt += (
+                    "Pressure Significance Table (from company knowledge documents — "
+                    "use this table to determine the correct hole size, significance text, "
+                    "and consequence description for the calculated ratio above):\n"
+                    f"{overpressure_table_context}\n\n"
+                )
             else:
-                prompt += "  RESULT: Overpressure does not exceed 2× design pressure. No vessel rupture assumed.\n"
+                prompt += (
+                    "The pressure significance table was not retrieved from the knowledge base. "
+                    "Use your engineering knowledge to determine the appropriate consequence "
+                    "based on the calculated ratio.\n\n"
+                )
+            prompt += (
+                "Look up the calculated ratio in the Pressure Significance Table above. "
+                "Return the matching hole_size, significance, consequence_description, "
+                "is_vessel_rupture (true only for vessel rupture row), and the document source "
+                "in the overpressure_result field. "
+                "If the ratio indicates vessel rupture, you MUST include vessel rupture and "
+                "the corresponding leak size in intermediate_consequences and consequences, "
+                "and include jet fire as an escalation consequence in scenario_comments.\n"
+            )
 
         if node_instruments:
             prompt += "\nInstruments on this equipment (for safeguard context):\n"
@@ -529,7 +543,10 @@ OVERPRESSURE ANALYSIS:
                 prompt += f"  - {tag} ({itype})\n"
 
         if knowledge_context:
-            prompt += f"\nRelevant Knowledge Context (from company documents — use this to ground your analysis):\n{knowledge_context}\n"
+            prompt += (
+                f"\nRelevant Knowledge Context (from company documents — "
+                f"use this to ground your analysis):\n{knowledge_context}\n"
+            )
 
         prompt += """
 MANDATORY SAFEGUARD RULES:
@@ -546,16 +563,23 @@ Return JSON in this exact format:
 {
     "intermediate_consequences": [
         "Immediate physical effect 1 (e.g., pressure rises above design)",
-        "Immediate physical effect 2 (e.g., vessel rupture — 6-inch leak)"
+        "Immediate physical effect 2 (e.g., leak size and type from table)"
     ],
     "consequences": [
         "Final worst credible outcome 1 (no safeguards assumed)",
-        "Final worst credible outcome 2 (e.g., VCE / jet fire)"
+        "Final worst credible outcome 2 (e.g., VCE / jet fire if applicable)"
     ],
     "scenario_comments": "Narrative: cause chain → intermediate effects → final impact",
     "consequence_category": "PAF",
     "personnel_exposure": ">14",
     "drawing_references": [],
+    "overpressure_result": {
+        "hole_size": "Hole size from table (e.g., '6-inches (150 mm)'), or null if not a pressure deviation",
+        "significance": "Significance text from table (e.g., 'Stresses greater than yield strength'), or null",
+        "consequence_description": "Consequence text from table (e.g., 'Potential for permanent deformation and vessel rupture'), or null",
+        "is_vessel_rupture": false,
+        "source": "Document name and page reference, or null"
+    },
     "mitigation_details": [
         {
             "name": "Full descriptive name of the mitigation",
@@ -579,7 +603,10 @@ Rules:
 - consequence_category: must be ONE of "PAF", "PD/LOR", "ECR"
 - personnel_exposure: must be ONE of "<5", "5-14", ">14"
   Use the Production Deck PAF Consequence table in the knowledge context.
-  For a 6-inch leak on a production deck: personnel_exposure is typically ">14" (PEC-1)
+- overpressure_result: populate ONLY for High Pressure deviations where a ratio was provided.
+  Set all fields to null for other deviation types.
+  hole_size, significance, consequence_description MUST come from the Pressure Significance
+  Table retrieved from the knowledge documents — do NOT invent values.
 - drawing_references: empty list (drawing number is set separately from P&ID metadata)
 - Apply MANDATORY SAFEGUARD RULES above — these are non-negotiable
 - Use knowledge context to ground your analysis wherever possible

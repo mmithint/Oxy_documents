@@ -253,13 +253,17 @@ export interface OverpressureCalc {
   max_credible_pressure: number;
   /** Equipment design pressure in PSIG. */
   design_pressure: number;
-  /** Ratio = max_credible / design. */
+  /** Ratio = max_credible / design (pure math, always present). */
   ratio: number;
-  /** True if ratio > 2.0 → vessel rupture assumed. */
+  /** True when LLM confirms vessel rupture scenario from knowledge document table. */
   exceeds_2x: boolean;
-  /** "6 inch" when exceeds_2x, otherwise null. */
+  /** Hole size from Pressure Significance Table (e.g. "6-inches (150 mm)"). */
   assumed_leak_size: string | null;
-  /** "Consequence Document, Page 14" when exceeds_2x, otherwise null. */
+  /** Significance text from table (e.g. "Stresses greater than yield strength"). */
+  significance: string | null;
+  /** Consequence description from table (e.g. "Potential for permanent deformation and vessel rupture"). */
+  consequence_description: string | null;
+  /** Document + page reference from the knowledge base. */
   source: string | null;
 }
 

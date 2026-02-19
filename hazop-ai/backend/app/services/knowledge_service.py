@@ -186,6 +186,23 @@ class KnowledgeService:
         )
         return await self.retrieve_relevant_context(query=query, limit=limit)
 
+    async def retrieve_overpressure_table_context(self, limit: int = 3) -> str:
+        """
+        Targeted retrieval for the pressure significance / hole size table.
+
+        Fetches the document chunk(s) containing the pressure ratio → leak size
+        lookup table (e.g., Guideline for Consequence Development in PHA Studies,
+        Document #60.400.301.07, Page 14).  The LLM uses this table to determine
+        the appropriate assumed hole size and consequence description for a given
+        calculated pressure ratio — nothing is hardcoded in Python.
+        """
+        query = (
+            "pressure significance MAWP overpressure ratio hole size leak consequence "
+            "vessel rupture flange instrumentation 1.1 1.3 2.0 "
+            "guideline consequence development PHA studies"
+        )
+        return await self.retrieve_relevant_context(query=query, limit=limit)
+
     async def search_knowledge(
         self,
         query: str,

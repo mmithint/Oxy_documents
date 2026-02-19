@@ -171,16 +171,28 @@ class ApproveCausesResponse(BaseModel):
 
 class OverpressureCalc(BaseModel):
     """
-    Deterministic overpressure calculation for High Pressure deviations.
-    When max_credible_pressure > 2× design_pressure, vessel rupture (6" leak) is assumed.
-    Source: Consequence Document, Page 14.
+    Overpressure calculation for High Pressure deviations.
+
+    The pressure ratio (max_credible / design_pressure) is computed deterministically
+    in Python.  All thresholds and hole sizes are looked up from the knowledge base
+    documents by the LLM — nothing beyond the ratio is hardcoded here.
+
+    Fields populated by LLM table lookup (from Guideline for Consequence Development
+    in PHA Studies, Document #60.400.301.07, Page 14):
+      - assumed_leak_size       e.g. "1/4-inch (6 mm)", "3/4-inch (20 mm)", "6-inches (150 mm)"
+      - significance            e.g. "Stresses greater than yield strength"
+      - consequence_description e.g. "Potential for permanent deformation and vessel rupture"
+      - exceeds_2x              True only when LLM confirms vessel rupture scenario
+      - source                  Document + page reference from the knowledge doc
     """
-    max_credible_pressure: float       # upstream_pressure_psig from node
-    design_pressure: float             # equipment.design_pressure
-    ratio: float                       # max_credible / design
-    exceeds_2x: bool                   # ratio > 2.0
-    assumed_leak_size: Optional[str]   # "6 inch" if exceeds_2x
-    source: Optional[str]              # "Consequence Document, Page 14" if exceeds_2x
+    max_credible_pressure: float           # upstream_pressure_psig from node
+    design_pressure: float                 # equipment.design_pressure
+    ratio: float                           # max_credible / design (pure math)
+    exceeds_2x: bool                       # LLM-confirmed vessel rupture flag
+    assumed_leak_size: Optional[str]       # from knowledge document table
+    significance: Optional[str]           # pressure significance text from document
+    consequence_description: Optional[str]  # consequence text from document
+    source: Optional[str]                  # document + page reference
 
 
 class DeviationConsequencesItem(BaseModel):
