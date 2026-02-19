@@ -119,11 +119,37 @@ class DeviationCausesItem(BaseModel):
     causes: list[str]
 
 
+class LLMContextItem(BaseModel):
+    """A single instrument entry in the LLM context transparency summary."""
+    tag: str
+    instrument_type: str
+    reason: str  # Human-readable explanation of why it is included or excluded
+
+
+class LLMContextSummary(BaseModel):
+    """
+    Transparency summary of what was and wasn't sent to the LLM for cause generation.
+
+    Design intent:
+      - Equipment is always fully provided (needed to reference tags in causes).
+      - Control valves are included: their failure CAN be the root cause of a deviation.
+      - Transmitters, indicators, gauges, safety devices, and alarms are excluded:
+        they are either passive measurement devices or safeguards — not root causes.
+      - Upstream pressure (SME-entered) and equipment pressures from the diagram
+        are included as numeric context.
+    """
+    included_equipment: list[dict]         # All equipment always provided to LLM
+    included_instruments: list[LLMContextItem]  # Control valves sent to LLM
+    excluded_instruments: list[LLMContextItem]  # Transmitters/safety devices/etc. excluded
+    upstream_pressure_psig: Optional[float] = None   # SME-entered max upstream pressure
+
+
 class GenerateCausesResponse(BaseModel):
     """Response with generated causes for SME review."""
     message: str
     node_id: str
     deviation_causes: list[DeviationCausesItem]
+    llm_context: Optional[LLMContextSummary] = None
 
 
 class ApproveCausesRequest(BaseModel):

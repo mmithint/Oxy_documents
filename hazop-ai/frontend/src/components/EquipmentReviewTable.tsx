@@ -4,6 +4,65 @@ import type { PIDNode, Equipment, Instrument } from "../types/hazop";
 import { COMMON_EQUIPMENT_TYPES, COMMON_INSTRUMENT_TYPES } from "../types/hazop";
 import { validateEquipment } from "../services/api";
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the letter prefix from an instrument tag.
+ * "PSHH-1210" → "PSHH",  "LT1210" → "LT"
+ */
+function getTagPrefix(tag: string): string {
+  const m = tag.toUpperCase().match(/^([A-Z]+)/);
+  return m ? m[1] : tag.toUpperCase();
+}
+
+const SAFETY_DEVICE_PREFIXES = new Set([
+  "PSH", "PSL", "PSHH", "PSLL",
+  "LSH", "LSL", "LSHH", "LSLL",
+  "TSH", "TSL", "TSHH", "TSLL",
+  "FSH", "FSL", "FSHH", "FSLL",
+  "PSV", "PRV", "SV", "RV",
+  "GD", "GDS", "FD",
+  "SDV", "ESV", "BDV", "XV",
+]);
+
+const SAFETY_TYPE_KEYWORDS = [
+  "safety valve", "switch high", "switch low",
+  "gas detector", "fire detector", "deluge",
+  "emergency shutdown", "shutdown valve", "blowdown valve",
+  "relief valve",
+];
+
+function isSafetyDevice(inst: Instrument): boolean {
+  const prefix = getTagPrefix(inst.tag);
+  if (SAFETY_DEVICE_PREFIXES.has(prefix)) return true;
+  const typeLower = inst.instrument_type.toLowerCase();
+  return SAFETY_TYPE_KEYWORDS.some((kw) => typeLower.includes(kw));
+}
+
+const TRANSMITTER_PREFIXES = new Set([
+  "PT", "LT", "FT", "TT", "DPT", "AT", "WT", "FDT", "PDT", "PDPT",
+]);
+
+function isTransmitter(inst: Instrument): boolean {
+  const prefix = getTagPrefix(inst.tag);
+  if (TRANSMITTER_PREFIXES.has(prefix)) return true;
+  return inst.instrument_type.toLowerCase().includes("transmitter");
+}
+
+const TRANSMITTER_TYPES = COMMON_INSTRUMENT_TYPES.filter(
+  (t) => t.toLowerCase().includes("transmitter")
+);
+const INSTRUMENT_ONLY_TYPES = COMMON_INSTRUMENT_TYPES.filter(
+  (t) =>
+    !SAFETY_TYPE_KEYWORDS.some((kw) => t.toLowerCase().includes(kw)) &&
+    !t.toLowerCase().includes("transmitter")
+);
+const SAFETY_DEVICE_TYPES = COMMON_INSTRUMENT_TYPES.filter(
+  (t) => SAFETY_TYPE_KEYWORDS.some((kw) => t.toLowerCase().includes(kw))
+);
+
 interface EquipmentReviewTableProps {
   node: PIDNode;
   onValidated: () => void;
@@ -26,11 +85,23 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
   const [newEqType, setNewEqType] = useState("");
   const [newEqPressure, setNewEqPressure] = useState("");
 
-  // Add instrument form state
+  // Add instrument form state (process instruments)
   const [showAddInstrument, setShowAddInstrument] = useState(false);
   const [newInstTag, setNewInstTag] = useState("");
   const [newInstType, setNewInstType] = useState("");
   const [newInstAssocEquip, setNewInstAssocEquip] = useState("");
+
+  // Add safety device form state (separate section)
+  const [showAddSafetyDevice, setShowAddSafetyDevice] = useState(false);
+  const [newSdTag, setNewSdTag] = useState("");
+  const [newSdType, setNewSdType] = useState("");
+  const [newSdAssocEquip, setNewSdAssocEquip] = useState("");
+
+  // Add transmitter form state (separate section)
+  const [showAddTransmitter, setShowAddTransmitter] = useState(false);
+  const [newTrTag, setNewTrTag] = useState("");
+  const [newTrType, setNewTrType] = useState("");
+  const [newTrAssocEquip, setNewTrAssocEquip] = useState("");
 
   // Edit state — tracks which row index is being edited (-1 = none)
   const [editingEqIndex, setEditingEqIndex] = useState(-1);
@@ -81,6 +152,38 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
     setNewInstType("Other");
     setNewInstAssocEquip("");
     setShowAddInstrument(false);
+  };
+
+  const addSafetyDevice = () => {
+    if (!newSdTag.trim()) return;
+    const newItem: Instrument = {
+      tag: newSdTag.trim().toUpperCase(),
+      instrument_type: newSdType.trim() || "Other",
+      setpoint: null,
+      associated_equipment_tag: newSdAssocEquip.trim() || null,
+      pid_reference: null,
+    };
+    setInstruments((prev) => [...prev, newItem]);
+    setNewSdTag("");
+    setNewSdType("Other");
+    setNewSdAssocEquip("");
+    setShowAddSafetyDevice(false);
+  };
+
+  const addTransmitter = () => {
+    if (!newTrTag.trim()) return;
+    const newItem: Instrument = {
+      tag: newTrTag.trim().toUpperCase(),
+      instrument_type: newTrType.trim() || "Pressure Transmitter",
+      setpoint: null,
+      associated_equipment_tag: newTrAssocEquip.trim() || null,
+      pid_reference: null,
+    };
+    setInstruments((prev) => [...prev, newItem]);
+    setNewTrTag("");
+    setNewTrType("");
+    setNewTrAssocEquip("");
+    setShowAddTransmitter(false);
   };
 
   // --- Edit Equipment ---
@@ -180,9 +283,13 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
 
     row++; // blank separator
 
-    // --- Instruments Section ---
+    // --- Instruments / Transmitters / Safety Devices split ---
+    const processInstruments = instruments.filter((i) => !isSafetyDevice(i) && !isTransmitter(i));
+    const transmitters = instruments.filter(isTransmitter);
+    const safetyDevices = instruments.filter(isSafetyDevice);
+
     const instTitle = sheet.getRow(row);
-    instTitle.getCell(1).value = "INSTRUMENTS & SAFETY DEVICES";
+    instTitle.getCell(1).value = "INSTRUMENTS";
     instTitle.getCell(1).font = sectionFont;
     row++;
 
@@ -197,13 +304,81 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
     });
     row++;
 
-    for (const inst of instruments) {
+    for (const inst of processInstruments) {
       const r = sheet.getRow(row);
       [inst.tag, inst.instrument_type, inst.associated_equipment_tag ?? ""].forEach((v, ci) => {
         const cell = r.getCell(ci + 1);
         cell.value = v;
         cell.border = allBorders;
       });
+      row++;
+    }
+    if (processInstruments.length === 0) {
+      sheet.getRow(row).getCell(1).value = "(none)";
+      row++;
+    }
+
+    row++; // blank separator
+
+    // --- Transmitters Section ---
+    const trTitle = sheet.getRow(row);
+    trTitle.getCell(1).value = "TRANSMITTERS";
+    trTitle.getCell(1).font = sectionFont;
+    row++;
+
+    const trHeaderRow = sheet.getRow(row);
+    instHeaders.forEach((h, ci) => {
+      const cell = trHeaderRow.getCell(ci + 1);
+      cell.value = h;
+      cell.font = boldFont;
+      cell.fill = headerFill;
+      cell.border = allBorders;
+    });
+    row++;
+
+    for (const tr of transmitters) {
+      const r = sheet.getRow(row);
+      [tr.tag, tr.instrument_type, tr.associated_equipment_tag ?? ""].forEach((v, ci) => {
+        const cell = r.getCell(ci + 1);
+        cell.value = v;
+        cell.border = allBorders;
+      });
+      row++;
+    }
+    if (transmitters.length === 0) {
+      sheet.getRow(row).getCell(1).value = "(none)";
+      row++;
+    }
+
+    row++; // blank separator
+
+    // --- Safety Devices Section ---
+    const sdTitle = sheet.getRow(row);
+    sdTitle.getCell(1).value = "SAFETY DEVICES";
+    sdTitle.getCell(1).font = sectionFont;
+    row++;
+
+    const sdHeaderRow = sheet.getRow(row);
+    instHeaders.forEach((h, ci) => {
+      const cell = sdHeaderRow.getCell(ci + 1);
+      cell.value = h;
+      cell.font = boldFont;
+      cell.fill = headerFill;
+      cell.border = allBorders;
+    });
+    row++;
+
+    for (const sd of safetyDevices) {
+      const r = sheet.getRow(row);
+      [sd.tag, sd.instrument_type, sd.associated_equipment_tag ?? ""].forEach((v, ci) => {
+        const cell = r.getCell(ci + 1);
+        cell.value = v;
+        cell.border = allBorders;
+      });
+      row++;
+    }
+    if (safetyDevices.length === 0) {
+      sheet.getRow(row).getCell(1).value = "(none)";
       row++;
     }
 
@@ -221,7 +396,7 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
       ["System", node.system],
     ];
     if (upstreamPressure) {
-      nodeInfo.push(["Upstream Pressure (PSIG)", parseFloat(upstreamPressure)]);
+      nodeInfo.push(["Maximum Upstream Pressure (PSIG)", parseFloat(upstreamPressure)]);
     }
     for (const [label, value] of nodeInfo) {
       const r = sheet.getRow(row);
@@ -459,19 +634,22 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
         </div>
       </div>
 
-      {/* Instruments Table */}
+      {/* ---- Instruments Table (control valves, indicators, gauges — NOT transmitters) ---- */}
       <div className="px-4 py-3 border-t border-gray-100">
         <div className="flex items-center justify-between mb-2">
           <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
-            Instruments & Safety Devices ({instruments.length})
+            Instruments ({instruments.filter((i) => !isSafetyDevice(i) && !isTransmitter(i)).length})
           </h4>
           <button
-            onClick={() => setShowAddInstrument(!showAddInstrument)}
+            onClick={() => { setShowAddInstrument(!showAddInstrument); setShowAddSafetyDevice(false); setShowAddTransmitter(false); }}
             className="text-xs font-medium text-purple-600 hover:text-purple-800"
           >
             {showAddInstrument ? "Cancel" : "+ Add Instrument"}
           </button>
         </div>
+        <p className="text-[11px] text-gray-400 mb-2">
+          Control valves, indicators, gauges and other process instruments (excluding transmitters).
+        </p>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead>
@@ -483,130 +661,83 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
               </tr>
             </thead>
             <tbody>
-              {instruments.map((inst, i) =>
-                editingInstIndex === i && editInst ? (
-                  <tr key={`edit-${i}`} className="border-b border-amber-100 bg-amber-50/30">
-                    <td className="py-2 pr-2">
-                      <input
-                        type="text"
-                        value={editInst.tag}
-                        onChange={(e) => setEditInst({ ...editInst, tag: e.target.value })}
-                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono"
-                      />
-                    </td>
-                    <td className="py-2 pr-2">
-                      <input
-                        type="text"
-                        list="inst-types"
-                        value={editInst.instrument_type}
-                        onChange={(e) => setEditInst({ ...editInst, instrument_type: e.target.value })}
-                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                        placeholder="Type or select"
-                      />
-                    </td>
-                    <td className="py-2 pr-2">
-                      <input
-                        type="text"
-                        value={editInst.associated_equipment_tag ?? ""}
-                        onChange={(e) => setEditInst({ ...editInst, associated_equipment_tag: e.target.value || null })}
-                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono"
-                      />
-                    </td>
-                    <td className="py-2 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <button
-                          onClick={saveEditInstrument}
-                          disabled={!editInst.tag.trim()}
-                          className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400"
-                        >
-                          Save
-                        </button>
-                        <button
-                          onClick={cancelEditInstrument}
-                          className="text-xs text-gray-500 hover:text-gray-700"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ) : (
-                  <tr key={inst.tag} className="border-b border-gray-50">
-                    <td className="py-2 pr-4 font-mono text-xs">{inst.tag}</td>
-                    <td className="py-2 pr-4">
-                      <span className="px-2 py-0.5 bg-purple-50 text-purple-700 rounded text-xs">
-                        {inst.instrument_type}
-                      </span>
-                    </td>
-                    <td className="py-2 pr-4 text-gray-500 text-xs">
-                      {inst.associated_equipment_tag ?? "—"}
-                    </td>
-                    <td className="py-2 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <button
-                          onClick={() => startEditInstrument(i)}
-                          className="text-xs text-amber-600 hover:text-amber-800"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => removeInstrument(i)}
-                          className="text-xs text-red-600 hover:text-red-800"
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                )
-              )}
+              {instruments
+                .map((inst, globalIdx) => ({ inst, globalIdx }))
+                .filter(({ inst }) => !isSafetyDevice(inst) && !isTransmitter(inst))
+                .map(({ inst, globalIdx }) =>
+                  editingInstIndex === globalIdx && editInst ? (
+                    <tr key={`edit-${globalIdx}`} className="border-b border-amber-100 bg-amber-50/30">
+                      <td className="py-2 pr-2">
+                        <input type="text" value={editInst.tag}
+                          onChange={(e) => setEditInst({ ...editInst, tag: e.target.value })}
+                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                      </td>
+                      <td className="py-2 pr-2">
+                        <input type="text" list="inst-types" value={editInst.instrument_type}
+                          onChange={(e) => setEditInst({ ...editInst, instrument_type: e.target.value })}
+                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
+                          placeholder="Type or select" />
+                      </td>
+                      <td className="py-2 pr-2">
+                        <input type="text" value={editInst.associated_equipment_tag ?? ""}
+                          onChange={(e) => setEditInst({ ...editInst, associated_equipment_tag: e.target.value || null })}
+                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                      </td>
+                      <td className="py-2 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button onClick={saveEditInstrument} disabled={!editInst.tag.trim()}
+                            className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
+                          <button onClick={cancelEditInstrument}
+                            className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr key={inst.tag} className="border-b border-gray-50">
+                      <td className="py-2 pr-4 font-mono text-xs">{inst.tag}</td>
+                      <td className="py-2 pr-4">
+                        <span className="px-2 py-0.5 bg-purple-50 text-purple-700 rounded text-xs">{inst.instrument_type}</span>
+                      </td>
+                      <td className="py-2 pr-4 text-gray-500 text-xs">{inst.associated_equipment_tag ?? "—"}</td>
+                      <td className="py-2 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button onClick={() => startEditInstrument(globalIdx)}
+                            className="text-xs text-amber-600 hover:text-amber-800">Edit</button>
+                          <button onClick={() => removeInstrument(globalIdx)}
+                            className="text-xs text-red-600 hover:text-red-800">Remove</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                )}
               {/* Add Instrument Inline Row */}
               {showAddInstrument && (
                 <tr className="border-b border-purple-100 bg-purple-50/30">
                   <td className="py-2 pr-2">
-                    <input
-                      type="text"
-                      placeholder="e.g. PSHH-1210"
-                      value={newInstTag}
+                    <input type="text" placeholder="e.g. LT-1210" value={newInstTag}
                       onChange={(e) => setNewInstTag(e.target.value)}
-                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono"
-                    />
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
                   </td>
                   <td className="py-2 pr-2">
-                    <input
-                      type="text"
-                      list="inst-types"
-                      value={newInstType}
+                    <input type="text" list="inst-types-process" value={newInstType}
                       onChange={(e) => setNewInstType(e.target.value)}
                       className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                      placeholder="Type or select"
-                    />
+                      placeholder="Type or select" />
                   </td>
                   <td className="py-2 pr-2">
-                    <input
-                      type="text"
-                      placeholder="e.g. V-1210"
-                      value={newInstAssocEquip}
+                    <input type="text" placeholder="e.g. V-1210" value={newInstAssocEquip}
                       onChange={(e) => setNewInstAssocEquip(e.target.value)}
-                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono"
-                    />
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
                   </td>
                   <td className="py-2 text-right">
-                    <button
-                      onClick={addInstrument}
-                      disabled={!newInstTag.trim()}
-                      className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400"
-                    >
-                      Add
-                    </button>
+                    <button onClick={addInstrument} disabled={!newInstTag.trim()}
+                      className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Add</button>
                   </td>
                 </tr>
               )}
-              {instruments.length === 0 && !showAddInstrument && (
+              {instruments.filter((i) => !isSafetyDevice(i) && !isTransmitter(i)).length === 0 && !showAddInstrument && (
                 <tr>
-                  <td colSpan={4} className="py-4 text-center text-gray-400 text-xs">
-                    No instruments detected
-                  </td>
+                  <td colSpan={4} className="py-3 text-center text-gray-400 text-xs">No instruments detected</td>
                 </tr>
               )}
             </tbody>
@@ -614,14 +745,236 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
         </div>
       </div>
 
-      {/* Upstream Pressure Source */}
+      {/* ---- Transmitters Table (PT, LT, FT, TT, etc.) ---- */}
+      <div className="px-4 py-3 border-t border-gray-100">
+        <div className="flex items-center justify-between mb-2">
+          <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+            Transmitters ({instruments.filter(isTransmitter).length})
+          </h4>
+          <button
+            onClick={() => { setShowAddTransmitter(!showAddTransmitter); setShowAddInstrument(false); setShowAddSafetyDevice(false); }}
+            className="text-xs font-medium text-teal-600 hover:text-teal-800"
+          >
+            {showAddTransmitter ? "Cancel" : "+ Add Transmitter"}
+          </button>
+        </div>
+        <p className="text-[11px] text-gray-400 mb-2">
+          Pressure, level, flow and temperature transmitters (PT, LT, FT, TT, etc.). Excluded from cause generation — measurement only.
+        </p>
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-100">
+                <th className="text-left py-2 pr-4 font-medium text-gray-600">Tag</th>
+                <th className="text-left py-2 pr-4 font-medium text-gray-600">Type</th>
+                <th className="text-left py-2 pr-4 font-medium text-gray-600">Associated Equipment</th>
+                <th className="text-right py-2 font-medium text-gray-600">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {instruments
+                .map((inst, globalIdx) => ({ inst, globalIdx }))
+                .filter(({ inst }) => isTransmitter(inst))
+                .map(({ inst, globalIdx }) =>
+                  editingInstIndex === globalIdx && editInst ? (
+                    <tr key={`edit-${globalIdx}`} className="border-b border-amber-100 bg-amber-50/30">
+                      <td className="py-2 pr-2">
+                        <input type="text" value={editInst.tag}
+                          onChange={(e) => setEditInst({ ...editInst, tag: e.target.value })}
+                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                      </td>
+                      <td className="py-2 pr-2">
+                        <input type="text" list="inst-types-transmitter" value={editInst.instrument_type}
+                          onChange={(e) => setEditInst({ ...editInst, instrument_type: e.target.value })}
+                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
+                          placeholder="Type or select" />
+                      </td>
+                      <td className="py-2 pr-2">
+                        <input type="text" value={editInst.associated_equipment_tag ?? ""}
+                          onChange={(e) => setEditInst({ ...editInst, associated_equipment_tag: e.target.value || null })}
+                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                      </td>
+                      <td className="py-2 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button onClick={saveEditInstrument} disabled={!editInst.tag.trim()}
+                            className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
+                          <button onClick={cancelEditInstrument}
+                            className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr key={inst.tag} className="border-b border-gray-50">
+                      <td className="py-2 pr-4 font-mono text-xs">{inst.tag}</td>
+                      <td className="py-2 pr-4">
+                        <span className="px-2 py-0.5 bg-teal-50 text-teal-700 rounded text-xs">{inst.instrument_type}</span>
+                      </td>
+                      <td className="py-2 pr-4 text-gray-500 text-xs">{inst.associated_equipment_tag ?? "—"}</td>
+                      <td className="py-2 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button onClick={() => startEditInstrument(globalIdx)}
+                            className="text-xs text-amber-600 hover:text-amber-800">Edit</button>
+                          <button onClick={() => removeInstrument(globalIdx)}
+                            className="text-xs text-red-600 hover:text-red-800">Remove</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                )}
+              {/* Add Transmitter Inline Row */}
+              {showAddTransmitter && (
+                <tr className="border-b border-teal-100 bg-teal-50/30">
+                  <td className="py-2 pr-2">
+                    <input type="text" placeholder="e.g. PT-1210" value={newTrTag}
+                      onChange={(e) => setNewTrTag(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                  </td>
+                  <td className="py-2 pr-2">
+                    <input type="text" list="inst-types-transmitter" value={newTrType}
+                      onChange={(e) => setNewTrType(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
+                      placeholder="Type or select" />
+                  </td>
+                  <td className="py-2 pr-2">
+                    <input type="text" placeholder="e.g. V-1210" value={newTrAssocEquip}
+                      onChange={(e) => setNewTrAssocEquip(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                  </td>
+                  <td className="py-2 text-right">
+                    <button onClick={addTransmitter} disabled={!newTrTag.trim()}
+                      className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Add</button>
+                  </td>
+                </tr>
+              )}
+              {instruments.filter(isTransmitter).length === 0 && !showAddTransmitter && (
+                <tr>
+                  <td colSpan={4} className="py-3 text-center text-gray-400 text-xs">No transmitters detected</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ---- Safety Devices Table (PSVs, high-high switches, gas detectors, ESD valves, etc.) ---- */}
+      <div className="px-4 py-3 border-t border-gray-100">
+        <div className="flex items-center justify-between mb-2">
+          <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+            Safety Devices ({instruments.filter(isSafetyDevice).length})
+          </h4>
+          <button
+            onClick={() => { setShowAddSafetyDevice(!showAddSafetyDevice); setShowAddInstrument(false); setShowAddTransmitter(false); }}
+            className="text-xs font-medium text-red-600 hover:text-red-800"
+          >
+            {showAddSafetyDevice ? "Cancel" : "+ Add Safety Device"}
+          </button>
+        </div>
+        <p className="text-[11px] text-gray-400 mb-2">
+          Safety switches (PSHH/LSHH), relief valves (PSV/PRV), gas/fire detectors, ESD valves and deluge systems.
+        </p>
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-100">
+                <th className="text-left py-2 pr-4 font-medium text-gray-600">Tag</th>
+                <th className="text-left py-2 pr-4 font-medium text-gray-600">Type</th>
+                <th className="text-left py-2 pr-4 font-medium text-gray-600">Associated Equipment</th>
+                <th className="text-right py-2 font-medium text-gray-600">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {instruments
+                .map((inst, globalIdx) => ({ inst, globalIdx }))
+                .filter(({ inst }) => isSafetyDevice(inst))
+                .map(({ inst, globalIdx }) =>
+                  editingInstIndex === globalIdx && editInst ? (
+                    <tr key={`edit-${globalIdx}`} className="border-b border-amber-100 bg-amber-50/30">
+                      <td className="py-2 pr-2">
+                        <input type="text" value={editInst.tag}
+                          onChange={(e) => setEditInst({ ...editInst, tag: e.target.value })}
+                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                      </td>
+                      <td className="py-2 pr-2">
+                        <input type="text" list="inst-types-safety" value={editInst.instrument_type}
+                          onChange={(e) => setEditInst({ ...editInst, instrument_type: e.target.value })}
+                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
+                          placeholder="Type or select" />
+                      </td>
+                      <td className="py-2 pr-2">
+                        <input type="text" value={editInst.associated_equipment_tag ?? ""}
+                          onChange={(e) => setEditInst({ ...editInst, associated_equipment_tag: e.target.value || null })}
+                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                      </td>
+                      <td className="py-2 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button onClick={saveEditInstrument} disabled={!editInst.tag.trim()}
+                            className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
+                          <button onClick={cancelEditInstrument}
+                            className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr key={inst.tag} className="border-b border-gray-50">
+                      <td className="py-2 pr-4 font-mono text-xs">{inst.tag}</td>
+                      <td className="py-2 pr-4">
+                        <span className="px-2 py-0.5 bg-red-50 text-red-700 rounded text-xs">{inst.instrument_type}</span>
+                      </td>
+                      <td className="py-2 pr-4 text-gray-500 text-xs">{inst.associated_equipment_tag ?? "—"}</td>
+                      <td className="py-2 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button onClick={() => startEditInstrument(globalIdx)}
+                            className="text-xs text-amber-600 hover:text-amber-800">Edit</button>
+                          <button onClick={() => removeInstrument(globalIdx)}
+                            className="text-xs text-red-600 hover:text-red-800">Remove</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                )}
+              {/* Add Safety Device Inline Row */}
+              {showAddSafetyDevice && (
+                <tr className="border-b border-red-100 bg-red-50/30">
+                  <td className="py-2 pr-2">
+                    <input type="text" placeholder="e.g. PSHH-1210" value={newSdTag}
+                      onChange={(e) => setNewSdTag(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                  </td>
+                  <td className="py-2 pr-2">
+                    <input type="text" list="inst-types-safety" value={newSdType}
+                      onChange={(e) => setNewSdType(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
+                      placeholder="Type or select" />
+                  </td>
+                  <td className="py-2 pr-2">
+                    <input type="text" placeholder="e.g. V-1210" value={newSdAssocEquip}
+                      onChange={(e) => setNewSdAssocEquip(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                  </td>
+                  <td className="py-2 text-right">
+                    <button onClick={addSafetyDevice} disabled={!newSdTag.trim()}
+                      className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Add</button>
+                  </td>
+                </tr>
+              )}
+              {instruments.filter(isSafetyDevice).length === 0 && !showAddSafetyDevice && (
+                <tr>
+                  <td colSpan={4} className="py-3 text-center text-gray-400 text-xs">No safety devices detected</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Node Design Parameters */}
       <div className="px-4 py-3 border-t border-gray-100">
         <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide mb-2">
           Node Design Parameters
         </h4>
         <div className="flex items-center gap-3">
           <label className="text-sm text-gray-600 whitespace-nowrap">
-            Upstream Pressure Source
+            Maximum Upstream Pressure Source
           </label>
           <div className="flex items-center gap-1.5">
             <input
@@ -666,14 +1019,16 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
 
       {/* Datalist suggestions for combo-box inputs */}
       <datalist id="eq-types">
-        {COMMON_EQUIPMENT_TYPES.map((t) => (
-          <option key={t} value={t} />
-        ))}
+        {COMMON_EQUIPMENT_TYPES.map((t) => <option key={t} value={t} />)}
       </datalist>
-      <datalist id="inst-types">
-        {COMMON_INSTRUMENT_TYPES.map((t) => (
-          <option key={t} value={t} />
-        ))}
+      <datalist id="inst-types-process">
+        {INSTRUMENT_ONLY_TYPES.map((t) => <option key={t} value={t} />)}
+      </datalist>
+      <datalist id="inst-types-transmitter">
+        {TRANSMITTER_TYPES.map((t) => <option key={t} value={t} />)}
+      </datalist>
+      <datalist id="inst-types-safety">
+        {SAFETY_DEVICE_TYPES.map((t) => <option key={t} value={t} />)}
       </datalist>
     </div>
   );

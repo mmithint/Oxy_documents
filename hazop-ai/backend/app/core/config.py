@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     COSMOS_CONNECTION_STRING: str = "mongodb://localhost:27017/"
     COSMOS_DATABASE_NAME: str = "Oxy"
 
+    # Embedding rate-limit tuning (Azure OpenAI TPM quota for the embedding deployment)
+    EMBEDDING_TPM_LIMIT: int = 240000
+
     class Config:
         env_file = ".env"
         case_sensitive = True

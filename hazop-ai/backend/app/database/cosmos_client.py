@@ -251,14 +251,21 @@ class MongoDBClient:
         limit: int,
         document_type: str | None,
     ) -> list[dict]:
-        """Cosmos DB native vector search using HNSW index."""
+        """
+        Cosmos DB native vector search using HNSW index.
+
+        Requests limit * 3 candidates from the index so that after the
+        document_type $match filter there are still `limit` results left.
+        Without oversampling, filtering after the search can return fewer
+        than `limit` chunks, starving the LLM of context.
+        """
         pipeline: list[dict] = [
             {
                 "$search": {
                     "cosmosSearch": {
                         "vector": query_embedding,
                         "path": "embedding",
-                        "k": limit,
+                        "k": limit * 3,  # oversample to survive post-filter trimming
                     },
                     "returnStoredSource": True,
                 }
@@ -328,6 +335,21 @@ class MongoDBClient:
             {"source_document": source_document}
         )
         return result.deleted_count
+
+    async def check_knowledge_chunks_exist(
+        self, document_type: str | None = None
+    ) -> bool:
+        """
+        Lightweight pre-check: returns True if at least one chunk exists
+        for the given document_type (or any type if None).
+
+        Used by knowledge_service before spending tokens on embedding generation
+        when there may be nothing to retrieve.
+        """
+        query: dict = {}
+        if document_type:
+            query["document_type"] = document_type
+        return self.knowledge_chunks_collection.count_documents(query, limit=1) > 0
 
 
 # --------------------------------------------------------------------------

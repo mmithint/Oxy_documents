@@ -221,10 +221,28 @@ export interface DeviationCauses {
   causes: string[];
 }
 
+export interface LLMContextItem {
+  tag: string;
+  instrument_type: string;
+  reason: string;
+}
+
+export interface LLMContextSummary {
+  /** All equipment — always fully provided to the LLM. */
+  included_equipment: { tag: string; equipment_type: string; design_pressure: number | null }[];
+  /** Control valves sent to the LLM (their failure can cause deviations). */
+  included_instruments: LLMContextItem[];
+  /** Transmitters, safety devices, gauges, alarms — excluded from LLM input. */
+  excluded_instruments: LLMContextItem[];
+  /** Maximum upstream pressure entered by SME (PSIG). */
+  upstream_pressure_psig: number | null;
+}
+
 export interface GenerateCausesResponse {
   message: string;
   node_id: string;
   deviation_causes: DeviationCauses[];
+  llm_context: LLMContextSummary | null;
 }
 
 export const STATUS_COLORS: Record<ReviewStatus, string> = {

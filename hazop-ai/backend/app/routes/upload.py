@@ -90,7 +90,7 @@ async def upload_pid(
 
 @router.post("/knowledge")
 async def upload_knowledge_document(
-    file: UploadFile = File(..., description="Knowledge document (PDF)"),
+    file: UploadFile = File(..., description="Knowledge document (PDF, DOCX, or XLSX)"),
     document_type: str = Form(
         ...,
         description="Document type: consequence_guidance, risk_matrix, barrier_philosophy, sop, hazop_reference",
@@ -114,6 +114,17 @@ async def upload_knowledge_document(
         raise HTTPException(
             status_code=400,
             detail=f"Invalid document_type. Allowed: {', '.join(valid_types)}",
+        )
+
+    allowed_knowledge_types = {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
+    if file.content_type and file.content_type not in allowed_knowledge_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {file.content_type}. Allowed: PDF, DOCX, XLSX",
         )
 
     file_content = await file.read()

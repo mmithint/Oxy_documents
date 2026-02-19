@@ -16,9 +16,12 @@ from pydantic import BaseModel, Field
 
 from app.models.pid_models import PIDNode
 from app.models.hazop_models import Safeguard
+import re
+
 from app.models.api_models import (
     HAZOPGenerateRequest, HAZOPGenerateResponse,
     GenerateCausesRequest, GenerateCausesResponse, DeviationCausesItem,
+    LLMContextItem, LLMContextSummary,
 )
 from app.services.hazop_generator import hazop_generator, hazop_generator_offline
 from app.services.deviation_generator import deviation_generator
@@ -28,6 +31,129 @@ from app.services.knowledge_service import knowledge_service
 from app.database.cosmos_client import cosmos_client
 
 router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# Instrument classification — what gets sent to the LLM vs what doesn't
+# ---------------------------------------------------------------------------
+
+# Tag prefixes whose failure CANNOT be a root cause of a deviation.
+# These are safeguards, passive measurement devices, or output-only devices.
+_LLM_EXCLUDED_PREFIXES: frozenset[str] = frozenset({
+    # Safety switches (safeguards — they respond to deviations, not cause them)
+    "PSH", "PSL", "PSHH", "PSLL",
+    "LSH", "LSL", "LSHH", "LSLL",
+    "TSH", "TSL", "TSHH", "TSLL",
+    "FSH", "FSL", "FSHH", "FSLL",
+    # Safety / relief valves (safeguards)
+    "PSV", "PRV", "SV", "RV",
+    # Gas and fire detectors (safeguards)
+    "GD", "GDS", "FD", "GAS",
+    # ESD / shutdown / blowdown valves (safeguards; their failure to close is rare
+    # and covered by the safety analysis separately — not a deviation root cause)
+    "SDV", "ESV", "BDV", "XV",
+    # Transmitters — passive measurement, not a cause
+    "PT", "LT", "FT", "TT", "DPT", "AT", "WT", "FDT", "PDT", "PDPT",
+    # Indicators — display only
+    "PI", "LI", "FI", "TI", "PDI", "DPI", "TDI",
+    # Gauges — display only
+    "LG", "PG", "FG", "TG",
+    # Alarms — output devices, not causes
+    "PA", "LA", "FA", "TA", "XA", "GA",
+})
+
+# Human-readable reason strings for the transparency panel
+_EXCLUDED_REASON: dict[str, str] = {
+    "switch": "Safety switch — safeguard device, not a root cause",
+    "safety_valve": "Safety / relief valve — safeguard device, not a root cause",
+    "detector": "Gas / fire detector — safeguard device, not a root cause",
+    "esd_valve": "ESD / shutdown valve — safeguard device, not a root cause",
+    "transmitter": "Transmitter — passive measurement, failure does not cause the deviation",
+    "indicator": "Indicator / gauge — display-only device, not a root cause",
+    "alarm": "Alarm — output device, not a root cause",
+    "unknown": "Monitoring / safety device — excluded to keep LLM focus on process causes",
+}
+
+
+def _get_tag_prefix(tag: str) -> str:
+    """Extract the letter prefix from a tag, e.g. 'PSHH-1210' → 'PSHH'."""
+    upper = tag.upper()
+    # Split on first non-letter character (dash, underscore, digit)
+    m = re.match(r"^([A-Z]+)", upper)
+    return m.group(1) if m else upper
+
+
+def _excluded_reason_for_prefix(prefix: str) -> str:
+    """Map a tag prefix to a human-readable exclusion reason."""
+    if any(prefix.startswith(p) for p in ("PSH", "PSL", "LSH", "LSL", "TSH", "TSL", "FSH", "FSL")):
+        return _EXCLUDED_REASON["switch"]
+    if prefix in ("PSV", "PRV", "SV", "RV"):
+        return _EXCLUDED_REASON["safety_valve"]
+    if prefix in ("GD", "GDS", "FD", "GAS"):
+        return _EXCLUDED_REASON["detector"]
+    if prefix in ("SDV", "ESV", "BDV", "XV"):
+        return _EXCLUDED_REASON["esd_valve"]
+    if prefix in ("PT", "LT", "FT", "TT", "DPT", "AT", "WT", "FDT", "PDT", "PDPT"):
+        return _EXCLUDED_REASON["transmitter"]
+    if prefix in ("PI", "LI", "FI", "TI", "PDI", "DPI", "TDI", "LG", "PG", "FG", "TG"):
+        return _EXCLUDED_REASON["indicator"]
+    if prefix in ("PA", "LA", "FA", "TA", "XA", "GA"):
+        return _EXCLUDED_REASON["alarm"]
+    return _EXCLUDED_REASON["unknown"]
+
+
+def _classify_instruments_for_llm(
+    instruments: list,
+) -> tuple[list[dict], list[LLMContextItem], list[LLMContextItem]]:
+    """
+    Split node instruments into three buckets for LLM cause generation:
+
+      included_dicts   — raw dicts sent to the LLM (control valves / process devices)
+      included_ctx     — LLMContextItem list for the transparency panel
+      excluded_ctx     — LLMContextItem list for the transparency panel
+
+    Only instruments whose failure can plausibly be a root cause (e.g. control
+    valves failing open/closed) are sent to the LLM.  Safeguards, transmitters,
+    indicators, gauges, and alarms are excluded — they do not cause deviations,
+    they respond to or measure them.
+    """
+    included_dicts: list[dict] = []
+    included_ctx: list[LLMContextItem] = []
+    excluded_ctx: list[LLMContextItem] = []
+
+    for inst in instruments:
+        prefix = _get_tag_prefix(inst.tag)
+        inst_type = inst.instrument_type
+
+        if prefix in _LLM_EXCLUDED_PREFIXES:
+            excluded_ctx.append(LLMContextItem(
+                tag=inst.tag,
+                instrument_type=inst_type,
+                reason=_excluded_reason_for_prefix(prefix),
+            ))
+        else:
+            # Include — determine a clear reason for the transparency panel
+            type_lower = inst_type.lower()
+            if "control valve" in type_lower:
+                reason = "Control valve — failure (open/closed) can directly cause a deviation"
+            elif any(prefix.startswith(cv) for cv in ("PCV", "LCV", "FCV", "TCV", "HCV")):
+                reason = "Control valve — failure (open/closed) can directly cause a deviation"
+            else:
+                reason = "Process instrument — included as potential cause context"
+
+            included_dicts.append({
+                "tag": inst.tag,
+                "instrument_type": inst_type,
+                "setpoint": inst.setpoint,
+                "associated_equipment_tag": inst.associated_equipment_tag,
+            })
+            included_ctx.append(LLMContextItem(
+                tag=inst.tag,
+                instrument_type=inst_type,
+                reason=reason,
+            ))
+
+    return included_dicts, included_ctx, excluded_ctx
 
 
 # --- Request Models ---
@@ -79,11 +205,36 @@ async def generate_causes(request: GenerateCausesRequest):
         node, selected_deviation_types=request.selected_deviation_types,
     )
 
-    # Step 2: Enrich causes with LLM for each deviation
+    # Step 2: Classify instruments once for the whole node
+    #   - included_instrument_dicts: control valves sent to LLM (can be root causes)
+    #   - included_ctx / excluded_ctx: for the frontend transparency panel
+    included_instrument_dicts, included_ctx, excluded_ctx = _classify_instruments_for_llm(
+        node.instruments
+    )
+
+    # Build equipment dicts once (always fully provided to LLM, with design pressure)
+    equipment_data = [
+        {
+            "tag": eq.tag,
+            "equipment_type": eq.equipment_type,
+            "design_pressure": eq.design_pressure,
+        }
+        for eq in node.equipment
+    ]
+
+    # Build the LLM context summary for the frontend
+    llm_context = LLMContextSummary(
+        included_equipment=equipment_data,
+        included_instruments=included_ctx,
+        excluded_instruments=excluded_ctx,
+        upstream_pressure_psig=node.upstream_pressure_psig,
+    )
+
+    # Step 3: Enrich causes with LLM for each deviation
     deviation_causes_list: list[DeviationCausesItem] = []
 
     for dev in deviations:
-        # Find the equipment for context
+        # Find the equipment for this deviation
         equipment = None
         for eq in node.equipment:
             if eq.tag == dev.equipment_tag:
@@ -92,6 +243,7 @@ async def generate_causes(request: GenerateCausesRequest):
 
         equipment_type = equipment.equipment_type if equipment else "Unknown"
         design_pressure = equipment.design_pressure if equipment else None
+        operating_pressure = equipment.operating_pressure if equipment else None
         design_temperature = equipment.design_temperature if equipment else None
 
         # RAG: Retrieve knowledge context
@@ -105,43 +257,52 @@ async def generate_causes(request: GenerateCausesRequest):
         except Exception:
             pass
 
-        # LLM: Enrich causes only
+        # LLM: Enrich causes using filtered instruments + pressure context
         try:
             safeguard_descriptions = [sg.description for sg in dev.safeguards]
 
-            # Build instrument and equipment dicts for LLM context
-            instruments_data = [
-                {
-                    "tag": inst.tag,
-                    "instrument_type": inst.instrument_type,
-                    "setpoint": inst.setpoint,
-                    "associated_equipment_tag": inst.associated_equipment_tag,
-                }
-                for inst in node.instruments
+            # Only send instruments associated with this specific equipment
+            # (control valves only — safeguards/transmitters/gauges already excluded)
+            equipment_instrument_dicts = [
+                inst for inst in included_instrument_dicts
+                if inst.get("associated_equipment_tag") == dev.equipment_tag
             ]
-            equipment_data = [
-                {
-                    "tag": eq.tag,
-                    "equipment_type": eq.equipment_type,
-                }
-                for eq in node.equipment
-            ]
+
+            # If no control valves exist for this equipment and it's not a special
+            # category (Human Factors / Previous Incidents), the LLM has nothing
+            # instrument-specific to work with. Skip the call to avoid generic output.
+            if not equipment_instrument_dicts and not dev.requires_mandatory_sme_review:
+                deviation_causes_list.append(DeviationCausesItem(
+                    deviation_id=dev.deviation_id,
+                    equipment_tag=dev.equipment_tag,
+                    deviation=dev.deviation,
+                    guideword=dev.guideword.value,
+                    parameter=dev.parameter.value,
+                    causes=dev.causes,  # ontology causes only
+                ))
+                continue
 
             result = await openai_service.generate_deviation_content(
                 equipment_type=equipment_type,
                 equipment_tag=dev.equipment_tag,
                 deviation=dev.deviation,
                 design_pressure=design_pressure,
+                operating_pressure=operating_pressure,
+                upstream_pressure_psig=node.upstream_pressure_psig,
                 design_temperature=design_temperature,
                 existing_safeguards=safeguard_descriptions,
                 knowledge_context=knowledge_context if knowledge_context else None,
                 is_special_category=dev.requires_mandatory_sme_review,
-                node_instruments=instruments_data,
+                # Instruments scoped to this equipment; safeguards/transmitters excluded
+                node_instruments=equipment_instrument_dicts,
                 node_equipment=equipment_data,
             )
 
-            # Merge LLM causes with ontology causes
+            # Causes are already validated and flattened to plain strings
+            # inside generate_deviation_content() — no further filtering needed.
             llm_causes = result.get("causes", [])
+
+            # Merge LLM causes with ontology causes
             merged_causes = hazop_generator._merge_lists(dev.causes, llm_causes)
         except Exception:
             # LLM failure: keep ontology causes as-is
@@ -167,6 +328,7 @@ async def generate_causes(request: GenerateCausesRequest):
         message=f"Generated causes for {len(deviation_causes_list)} deviations across {len(node.equipment)} equipment",
         node_id=request.node_id,
         deviation_causes=deviation_causes_list,
+        llm_context=llm_context,
     )
 
 

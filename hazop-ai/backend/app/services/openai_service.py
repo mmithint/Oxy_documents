@@ -300,6 +300,8 @@ Rules:
         deviation: str,
         design_pressure: float | None = None,
         design_temperature: float | None = None,
+        operating_pressure: float | None = None,
+        upstream_pressure_psig: float | None = None,
         existing_safeguards: list[str] | None = None,
         knowledge_context: str | None = None,
         is_special_category: bool = False,
@@ -334,6 +336,8 @@ Rules:
             deviation=deviation,
             design_pressure=design_pressure,
             design_temperature=design_temperature,
+            operating_pressure=operating_pressure,
+            upstream_pressure_psig=upstream_pressure_psig,
             existing_safeguards=existing_safeguards,
             knowledge_context=knowledge_context,
             is_special_category=is_special_category,
@@ -353,7 +357,32 @@ Rules:
         )
 
         content = response.choices[0].message.content
-        return json.loads(content)
+        result = json.loads(content)
+
+        # Validate and flatten causes from structured {description, tag} objects
+        # to plain strings, filtering out any hallucinated or invalid tags.
+        raw_causes = result.get("causes", [])
+
+        if is_special_category:
+            # Human Factors / Previous Incidents: extract descriptions as-is (no tag check)
+            result["causes"] = [
+                c["description"] if isinstance(c, dict) else str(c)
+                for c in raw_causes
+            ]
+        else:
+            # Standard deviations: keep only causes whose tag is in the valid instrument list
+            valid_tags = {
+                inst.get("tag", "").upper()
+                for inst in (node_instruments or [])
+            }
+            result["causes"] = [
+                c["description"]
+                for c in raw_causes
+                if isinstance(c, dict)
+                and c.get("tag", "").upper() in valid_tags
+            ]
+
+        return result
 
     async def generate_causes_and_consequences(
         self,
@@ -529,15 +558,16 @@ Rules:
 1. All outputs must be in structured JSON format
 2. Causes must be specific and technically plausible
 3. Consequences must assume NO safeguards are present (worst credible case)
-4. IMPORTANT: When P&ID instruments and equipment tags are provided, you MUST reference
-   them by their actual tag names in causes (e.g., "FSV-1010 fails closed" not "flow safety valve fails closed",
-   "PCV-1210 fails closed" not "pressure control valve fails closed"). This makes causes traceable to the P&ID.
-5. Do not assign risk scores — that is handled by the deterministic Risk Engine
-6. Do not classify safeguards into PR categories — that is handled by the Safeguard Classifier
-7. Focus only on cause/consequence reasoning
-8. Be conservative — if uncertain, list more severe consequences
-9. Reference industry standards and known failure modes where applicable
-10. Do not invent instrument or equipment tags that are not in the provided P&ID data"""
+4. Causes MUST reference a specific instrument tag from the provided P&ID instrument list.
+   Do NOT generate generic causes such as "downstream blockage", "fire case",
+   "external heat input", "operator error", or any cause that does not cite a specific tag.
+   If no instrument in the provided list can plausibly cause this deviation, return causes: []
+5. Do NOT invent instrument tags. Only use tags that appear verbatim in the provided list.
+   Equipment data is provided for context (design pressures, conditions) only.
+6. Do not assign risk scores — that is handled by the deterministic Risk Engine
+7. Do not classify safeguards into PR categories — that is handled by the Safeguard Classifier
+8. Focus only on cause/consequence reasoning
+9. Be conservative — if uncertain, list more severe consequences"""
 
     def _build_deviation_content_prompt(
         self,
@@ -546,8 +576,10 @@ Rules:
         deviation: str,
         design_pressure: float | None,
         design_temperature: float | None,
-        existing_safeguards: list[str] | None,
-        knowledge_context: str | None,
+        operating_pressure: float | None = None,
+        upstream_pressure_psig: float | None = None,
+        existing_safeguards: list[str] | None = None,
+        knowledge_context: str | None = None,
         is_special_category: bool = False,
         node_instruments: list[dict] | None = None,
         node_equipment: list[dict] | None = None,
@@ -561,12 +593,20 @@ Deviation: {deviation}
 
         if design_pressure:
             prompt += f"Design Pressure: {design_pressure} PSIG\n"
+        if operating_pressure:
+            prompt += f"Normal Operating Pressure: {operating_pressure} PSIG\n"
+        if upstream_pressure_psig:
+            prompt += (
+                f"Maximum Upstream Pressure Source: {upstream_pressure_psig} PSIG"
+                " (maximum pressure this node could receive from upstream — use for overpressure scenario analysis)\n"
+            )
         if design_temperature:
             prompt += f"Design Temperature: {design_temperature} °F\n"
 
-        # Include full P&ID instruments so LLM can reference actual tags
+        # Include instruments for this equipment — LLM must derive causes from these tags only
         if node_instruments:
-            prompt += "\nP&ID Instruments (extracted from the diagram — use these ACTUAL tags in causes):\n"
+            valid_tag_list = ", ".join(inst.get("tag", "") for inst in node_instruments)
+            prompt += f"\nP&ID Instruments for this equipment:\n"
             for inst in node_instruments:
                 tag = inst.get("tag", "")
                 itype = inst.get("instrument_type", "")
@@ -578,15 +618,27 @@ Deviation: {deviation}
                 if assoc:
                     line += f", associated with: {assoc}"
                 prompt += line + "\n"
+            prompt += f"\nValid tags for causes: {valid_tag_list}\n"
+            prompt += "ONLY reference tags from this list. Any other tag is invalid.\n"
+        else:
+            prompt += (
+                "\nNo control valves or process controllers are associated with this "
+                "equipment in the P&ID data. Return causes: [] — do NOT generate generic "
+                "causes to fill the list.\n"
+            )
 
-        # Include other equipment in the node for cross-reference
+        # Include other equipment in the node for context (design pressures, conditions)
         if node_equipment:
-            prompt += "\nOther Equipment in this node:\n"
+            prompt += "\nOther Equipment in this node (for context only — not root causes):\n"
             for eq in node_equipment:
                 etag = eq.get("tag", "")
                 etype = eq.get("equipment_type", "")
+                dp = eq.get("design_pressure")
                 if etag != equipment_tag:  # Skip the current equipment
-                    prompt += f"  - {etag} ({etype})\n"
+                    line = f"  - {etag} ({etype})"
+                    if dp is not None:
+                        line += f", design pressure: {dp} PSIG"
+                    prompt += line + "\n"
 
         if existing_safeguards:
             prompt += f"\nKnown Safeguards (for context only, NOT for consequence evaluation): {json.dumps(existing_safeguards)}\n"
@@ -623,9 +675,8 @@ Consequences should reflect actual incident outcomes from industry experience.
 Return JSON in this exact format:
 {
     "causes": [
-        "Specific cause 1",
-        "Specific cause 2",
-        "Specific cause 3"
+        {"description": "Full cause description referencing the instrument", "tag": "INST-TAG"},
+        {"description": "Another cause referencing a different instrument", "tag": "INST-TAG2"}
     ],
     "drawing_references": ["DWG reference if found in knowledge context"],
     "intermediate_consequences": [
@@ -660,10 +711,11 @@ Return JSON in this exact format:
 }
 
 Rules:
-- List 3-6 causes, ordered by likelihood
-- CRITICAL: Reference actual P&ID instrument/equipment tags in causes when applicable
-  (e.g., "FSV-1010 fails closed" or "PCV-1210 fails closed, or all gas outlet manual valves inadvertently closed")
-  NOT generic descriptions like "control valve failure"
+- Each cause must be an object with "description" (string) and "tag" (the instrument tag from the valid list).
+- "tag" must exactly match one of the tags in the "Valid tags for causes" list.
+- If no instrument in the valid list can cause this deviation, return causes: []
+- Do NOT generate generic causes (fire case, operator error, downstream blockage, etc.)
+- Only include causes that are directly traceable to an instrument failure in the valid list.
 - intermediate_consequences: 2-4 immediate effects (before escalation)
 - consequences: 2-4 final impacts (worst credible, no safeguards assumed)
 - scenario_comments: narrative chain from cause → intermediate → final impact
@@ -671,9 +723,7 @@ Rules:
 - mitigation_details: extract from knowledge context if available, otherwise empty list
 - planned_residual_risk: estimate post-recommendation risk severity (1-5) and probability (1-5)
 - Be specific to the equipment type and deviation
-- Do not include generic or vague statements
 - Use knowledge context to ground your answers where possible
-- Do not invent tags — only use tags from the provided P&ID instruments/equipment lists
 """
         return prompt
 
