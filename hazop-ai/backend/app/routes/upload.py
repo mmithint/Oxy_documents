@@ -7,6 +7,8 @@ Endpoints:
   GET  /api/upload/pid/list         → List all uploaded P&ID files
 """
 
+import re
+
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 
 from app.services.blob_storage import blob_storage
@@ -63,9 +65,10 @@ async def upload_pid(
         node_id=node_id,
     )
 
-    # Step 3: Update blob URL in extraction
+    # Step 3: Update blob URL + normalize drawing number in extraction
     for node in extraction.nodes:
         node.pid_drawings.append(blob_result["blob_url"])
+        node.drawing_number = _normalize_drawing_number(node.drawing_number)
 
     # Step 4: Store extracted nodes in Cosmos DB (include LLM data)
     for node in extraction.nodes:
@@ -164,6 +167,18 @@ async def list_nodes():
     """List all extracted nodes."""
     nodes = await cosmos_client.get_all_nodes()
     return {"nodes": nodes, "count": len(nodes)}
+
+
+def _normalize_drawing_number(raw: str | None) -> str | None:
+    """
+    Strip trailing revision suffix from an APC / drawing number.
+    e.g. "APC No. 4020(c)" → "APC No. 4020"
+         "DWG-4020-A"      → "DWG-4020-A"  (no trailing parens, unchanged)
+    """
+    if not raw:
+        return None
+    cleaned = re.sub(r'\s*\([^)]+\)\s*$', '', raw.strip())
+    return cleaned or None
 
 
 @router.get("/nodes/{node_id}")

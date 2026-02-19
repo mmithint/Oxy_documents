@@ -72,6 +72,7 @@ class PIDNode(BaseModel):
     equipment: list[Equipment] = Field(default_factory=list, description="Equipment in this node")
     instruments: list[Instrument] = Field(default_factory=list, description="Instruments/safety devices in this node")
     pid_drawings: list[str] = Field(default_factory=list, description="Referenced P&ID drawing numbers")
+    drawing_number: Optional[str] = Field(None, description="APC / drawing number extracted from title block, e.g. 'APC No. 4020'")
     description: Optional[str] = Field(None, description="Node description or design intent")
     upstream_pressure_psig: Optional[float] = Field(None, description="Upstream pressure source in PSIG (max pressure the node could see)")
 

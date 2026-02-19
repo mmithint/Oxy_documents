@@ -10,6 +10,8 @@ import type {
   RiskAssessment,
   DeviationCauses,
   GenerateCausesResponse,
+  DeviationConsequences,
+  ConsequenceGenerationResponse,
 } from "../types/hazop";
 
 const api = axios.create({
@@ -270,6 +272,30 @@ export async function approveCauses(
     node_id: nodeId,
     sme_name: smeName,
     deviation_causes: deviationCauses,
+    comments,
+  });
+  return res.data;
+}
+
+export async function generateConsequences(
+  nodeId: string,
+): Promise<ConsequenceGenerationResponse> {
+  const res = await api.post<ConsequenceGenerationResponse>("/hazop/generate-consequences", {
+    node_id: nodeId,
+  });
+  return res.data;
+}
+
+export async function approveConsequences(
+  nodeId: string,
+  smeName: string,
+  deviationConsequences: DeviationConsequences[],
+  comments?: string,
+): Promise<Record<string, unknown>> {
+  const res = await api.post("/review/approve-consequences", {
+    node_id: nodeId,
+    sme_name: smeName,
+    deviation_consequences: deviationConsequences,
     comments,
   });
   return res.data;

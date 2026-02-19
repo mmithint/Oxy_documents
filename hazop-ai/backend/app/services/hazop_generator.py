@@ -69,6 +69,7 @@ class HAZOPGeneratorService:
         include_recommendations: bool = True,
         selected_deviation_types: list[str] | None = None,
         approved_causes: dict | None = None,
+        approved_consequences: dict | None = None,
     ) -> HAZOPReport:
         """
         Generate a complete HAZOP report for a validated node.
@@ -79,6 +80,8 @@ class HAZOPGeneratorService:
             selected_deviation_types: If provided, only generate these deviation types.
             approved_causes: If provided, dict of deviation_id -> {causes: [...], ...}
                             from SME review. LLM will not overwrite these causes.
+            approved_consequences: If provided, dict of deviation_id -> consequence fields
+                            from SME review. LLM will not overwrite these consequence fields.
 
         Returns:
             Complete HAZOPReport with all deviations, risk scores, and recommendations
@@ -94,6 +97,10 @@ class HAZOPGeneratorService:
         if approved_causes:
             deviations = self._apply_approved_causes(deviations, approved_causes)
 
+        # If we have approved consequences, apply them to matching deviations
+        if approved_consequences:
+            deviations = self._apply_approved_consequences(deviations, approved_consequences)
+
         # ---- STEP 2-6: Enrich each deviation ----
         enriched_deviations: list[Deviation] = []
 
@@ -103,11 +110,17 @@ class HAZOPGeneratorService:
                 approved_causes is not None
                 and deviation.deviation_id in approved_causes
             )
+            # Skip consequence generation if this deviation has SME-approved consequences
+            skip_consequences = (
+                approved_consequences is not None
+                and deviation.deviation_id in approved_consequences
+            )
             enriched = await self._enrich_deviation(
                 deviation=deviation,
                 node=node,
                 include_recommendations=include_recommendations,
                 skip_causes=skip_causes,
+                skip_consequences=skip_consequences,
             )
             enriched_deviations.append(enriched)
 
@@ -139,6 +152,7 @@ class HAZOPGeneratorService:
         node: PIDNode,
         include_recommendations: bool,
         skip_causes: bool = False,
+        skip_consequences: bool = False,
     ) -> Deviation:
         """
         Enrich a single deviation with LLM-generated content and risk scores.
@@ -173,6 +187,7 @@ class HAZOPGeneratorService:
                 design_temperature=design_temperature,
                 knowledge_context=knowledge_context,
                 skip_causes=skip_causes,
+                skip_consequences=skip_consequences,
                 node=node,
             )
 
@@ -232,10 +247,12 @@ class HAZOPGeneratorService:
         design_temperature: float | None,
         knowledge_context: str,
         skip_causes: bool = False,
+        skip_consequences: bool = False,
         node: PIDNode | None = None,
     ) -> None:
         """Enrich ALL HAZOP fields using single expanded LLM call + RAG context.
-        If skip_causes is True, causes are not overwritten (SME pre-approved)."""
+        If skip_causes is True, causes are not overwritten (SME pre-approved).
+        If skip_consequences is True, consequence fields are not overwritten (SME pre-approved)."""
         try:
             safeguard_descriptions = [
                 sg.description for sg in deviation.safeguards
@@ -278,27 +295,32 @@ class HAZOPGeneratorService:
                 llm_causes = result.get("causes", [])
                 deviation.causes = self._merge_lists(deviation.causes, llm_causes)
 
-            # Drawing references
-            deviation.drawing_references = result.get("drawing_references", [])
+            # Drawing references — prefer node.drawing_number over LLM guess
+            if node and getattr(node, "drawing_number", None):
+                deviation.drawing_references = [node.drawing_number]
+            else:
+                deviation.drawing_references = result.get("drawing_references", [])
 
-            # Intermediate consequences (new field)
-            deviation.intermediate_consequences = result.get("intermediate_consequences", [])
+            # Consequence fields — skip if SME pre-approved
+            if not skip_consequences:
+                # Intermediate consequences
+                deviation.intermediate_consequences = result.get("intermediate_consequences", [])
 
-            # Final impacts / consequences (merge with ontology)
-            llm_consequences = result.get("consequences", [])
-            deviation.consequences = self._merge_lists(deviation.consequences, llm_consequences)
+                # Final impacts / consequences (merge with ontology)
+                llm_consequences = result.get("consequences", [])
+                deviation.consequences = self._merge_lists(deviation.consequences, llm_consequences)
 
-            # Scenario comments
-            deviation.scenario_comments = result.get("scenario_comments")
+                # Scenario comments
+                deviation.scenario_comments = result.get("scenario_comments")
 
-            # Consequence category
-            cat = result.get("consequence_category")
-            if cat in ("PAF", "PD/LOR", "ECR"):
-                from app.models.hazop_models import ConsequenceCategory
-                deviation.consequence_category = ConsequenceCategory(cat)
+                # Consequence category
+                cat = result.get("consequence_category")
+                if cat in ("PAF", "PD/LOR", "ECR"):
+                    from app.models.hazop_models import ConsequenceCategory
+                    deviation.consequence_category = ConsequenceCategory(cat)
 
-            # PEC
-            deviation.pec = result.get("personnel_exposure")
+                # PEC
+                deviation.pec = result.get("personnel_exposure")
 
             # Enrich safeguards with control_category and cme_name from LLM
             mitigation_details = result.get("mitigation_details", [])
@@ -577,6 +599,46 @@ class HAZOPGeneratorService:
                         break
                 if original_id:
                     approved_causes[dev.deviation_id] = approved_causes[original_id]
+
+        return deviations
+
+    def _apply_approved_consequences(
+        self,
+        deviations: list[Deviation],
+        approved_consequences: dict,
+    ) -> list[Deviation]:
+        """
+        Apply SME-approved consequences to deviations before LLM enrichment.
+
+        Mirrors _apply_approved_causes — matches by (equipment_tag, deviation_name)
+        and populates all consequence fields from the approved data.
+        """
+        from app.models.hazop_models import ConsequenceCategory
+
+        approved_lookup: dict[tuple[str, str], dict] = {}
+        for _dev_id, data in approved_consequences.items():
+            key = (data.get("equipment_tag", ""), data.get("deviation", ""))
+            approved_lookup[key] = data
+
+        for dev in deviations:
+            key = (dev.equipment_tag, dev.deviation)
+            if key in approved_lookup:
+                approved = approved_lookup[key]
+                dev.intermediate_consequences = approved.get("intermediate_consequences", dev.intermediate_consequences)
+                dev.consequences = approved.get("consequences", dev.consequences)
+                dev.scenario_comments = approved.get("scenario_comments", dev.scenario_comments)
+                cat = approved.get("consequence_category")
+                if cat in ("PAF", "PD/LOR", "ECR"):
+                    dev.consequence_category = ConsequenceCategory(cat)
+                dev.pec = approved.get("pec", dev.pec)
+                # Register the new deviation_id in approved_consequences for skip lookup
+                original_id = None
+                for aid, adata in approved_consequences.items():
+                    if (adata.get("equipment_tag"), adata.get("deviation")) == key:
+                        original_id = aid
+                        break
+                if original_id:
+                    approved_consequences[dev.deviation_id] = approved_consequences[original_id]
 
         return deviations
 

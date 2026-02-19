@@ -108,6 +108,7 @@ Return JSON in this exact format:
     "node_name": "Descriptive name of the P&ID node/system",
     "system": "Parent system name (e.g. Hydrocarbon Processing Systems)",
     "description": "Brief description of what this P&ID covers",
+    "drawing_number": "APC No. 4020(c)",
     "equipment": [
         {
             "tag": "V-1210",
@@ -134,7 +135,9 @@ Rules:
 - Use null for numeric values you cannot determine from the text
 - Associate instruments with equipment using shared numeric suffixes (e.g., PSHH-1210 → V-1210)
 - Do NOT invent tags that aren't in the text
-- Pressure values are typically in PSIG, temperature in °F"""
+- Pressure values are typically in PSIG, temperature in °F
+- For drawing_number: look in the title block for "APC No.", "Drawing No.", "DWG No.", or similar
+  reference labels. Extract the full value as-is (e.g. "APC No. 4020(c)"). Use null if not found."""
 
         user_prompt = f"""Extract all equipment and instruments from this P&ID OCR text.
 
@@ -383,6 +386,205 @@ Rules:
             ]
 
         return result
+
+    async def generate_consequence_content(
+        self,
+        equipment_type: str,
+        equipment_tag: str,
+        deviation: str,
+        design_pressure: float | None = None,
+        operating_pressure: float | None = None,
+        upstream_pressure_psig: float | None = None,
+        design_temperature: float | None = None,
+        approved_causes: list[str] | None = None,
+        overpressure_calc: dict | None = None,
+        knowledge_context: str | None = None,
+        is_special_category: bool = False,
+        node_instruments: list[dict] | None = None,
+    ) -> dict:
+        """
+        Generate HAZOP consequence fields ONLY — causes are already SME-approved.
+
+        Focused LLM call that generates:
+          - intermediate_consequences, consequences, scenario_comments
+          - consequence_category (PAF / PD/LOR / ECR)
+          - personnel_exposure (PEC) using Production Deck PAF table
+          - mitigation_details (including LOC + Jet Fire triggered safeguards)
+          - drawing_references
+
+        Includes overpressure calculation context so the LLM knows whether
+        a vessel rupture / 6-inch leak assumption applies.
+
+        Returns dict — same field names as generate_deviation_content() for
+        compatibility with hazop_generator._enrich_all_fields().
+        """
+        prompt = self._build_consequence_prompt(
+            equipment_type=equipment_type,
+            equipment_tag=equipment_tag,
+            deviation=deviation,
+            design_pressure=design_pressure,
+            operating_pressure=operating_pressure,
+            upstream_pressure_psig=upstream_pressure_psig,
+            design_temperature=design_temperature,
+            approved_causes=approved_causes,
+            overpressure_calc=overpressure_calc,
+            knowledge_context=knowledge_context,
+            is_special_category=is_special_category,
+            node_instruments=node_instruments,
+        )
+
+        system_prompt = """You are a senior process safety engineer generating HAZOP consequence
+analysis for a specific deviation. The causes have already been reviewed and approved by an SME.
+Your task is to determine:
+1. Intermediate consequences (the chain of physical effects before final impact)
+2. Final consequences (worst credible outcomes, assuming NO safeguards)
+3. Scenario narrative (cause → intermediate → final)
+4. Consequence category (PAF, PD/LOR, or ECR)
+5. Personnel Exposure Count (PEC) using the Production Deck PAF Consequence table
+6. Mitigation details — including mandatory facility safeguards for LOC and Jet Fire scenarios
+
+Rules:
+- Consequences assume NO safeguards (worst credible case)
+- Use knowledge context documents to ground your analysis
+- If the scenario involves loss of containment or hydrocarbon release, ALWAYS add gas detection safeguard
+- If the scenario involves jet fire, ALWAYS add deluge safeguard
+- All outputs must be structured JSON"""
+
+        response = self.client.chat.completions.create(
+            model=settings.AZURE_OPENAI_DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=3000,
+            response_format={"type": "json_object"},
+        )
+
+        content = response.choices[0].message.content
+        return json.loads(content)
+
+    def _build_consequence_prompt(
+        self,
+        equipment_type: str,
+        equipment_tag: str,
+        deviation: str,
+        design_pressure: float | None,
+        operating_pressure: float | None,
+        upstream_pressure_psig: float | None,
+        design_temperature: float | None,
+        approved_causes: list[str] | None,
+        overpressure_calc: dict | None,
+        knowledge_context: str | None,
+        is_special_category: bool,
+        node_instruments: list[dict] | None,
+    ) -> str:
+        prompt = f"""Generate HAZOP consequence analysis for this deviation.
+Causes have already been approved by the SME — focus on consequences only.
+
+Equipment Type: {equipment_type}
+Equipment Tag: {equipment_tag}
+Deviation: {deviation}
+"""
+        if design_pressure:
+            prompt += f"Design Pressure: {design_pressure} PSIG\n"
+        if operating_pressure:
+            prompt += f"Normal Operating Pressure: {operating_pressure} PSIG\n"
+        if upstream_pressure_psig:
+            prompt += f"Maximum Credible Pressure (upstream blocked-flow): {upstream_pressure_psig} PSIG\n"
+        if design_temperature:
+            prompt += f"Design Temperature: {design_temperature} °F\n"
+
+        if approved_causes:
+            prompt += f"\nSME-Approved Causes:\n"
+            for c in approved_causes:
+                prompt += f"  - {c}\n"
+
+        # Overpressure calculation context
+        if overpressure_calc:
+            ratio = overpressure_calc.get("ratio", 0)
+            exceeds = overpressure_calc.get("exceeds_2x", False)
+            max_p = overpressure_calc.get("max_credible_pressure", 0)
+            design_p = overpressure_calc.get("design_pressure", 0)
+            prompt += f"""
+OVERPRESSURE ANALYSIS:
+  Maximum Credible Pressure: {max_p} PSIG
+  Design Pressure: {design_p} PSIG
+  Overpressure Ratio: {ratio:.2f}×
+"""
+            if exceeds:
+                prompt += """  RESULT: Overpressure exceeds 2× design pressure.
+  Per Consequence Document Page 14: This is assumed to result in VESSEL RUPTURE (6-inch leak).
+  You MUST include vessel rupture and 6-inch leak in intermediate_consequences and consequences.
+  Per Consequence Document Page 8: Include jet fire as an escalation consequence in scenario_comments.
+"""
+            else:
+                prompt += "  RESULT: Overpressure does not exceed 2× design pressure. No vessel rupture assumed.\n"
+
+        if node_instruments:
+            prompt += "\nInstruments on this equipment (for safeguard context):\n"
+            for inst in node_instruments:
+                tag = inst.get("tag", "")
+                itype = inst.get("instrument_type", "")
+                prompt += f"  - {tag} ({itype})\n"
+
+        if knowledge_context:
+            prompt += f"\nRelevant Knowledge Context (from company documents — use this to ground your analysis):\n{knowledge_context}\n"
+
+        prompt += """
+MANDATORY SAFEGUARD RULES:
+- If any consequence involves Loss of Containment (LOC), hydrocarbon release, pressurized leak,
+  or vessel rupture: you MUST include in mitigation_details:
+    name: "Gas detection (2 detectors at 20% LEL or 1 at 45% LEL — triggers closure of BSDV
+           and XV on each subsea flowline, and SSV and SDV on each dry tree well)"
+    control_category: "Detection", cme_kme: "CME"
+- If any consequence involves Jet Fire: you MUST include in mitigation_details:
+    name: "Deluge activated by TSE (Thermal Sensing Element)"
+    control_category: "Mitigation", cme_kme: "CME"
+
+Return JSON in this exact format:
+{
+    "intermediate_consequences": [
+        "Immediate physical effect 1 (e.g., pressure rises above design)",
+        "Immediate physical effect 2 (e.g., vessel rupture — 6-inch leak)"
+    ],
+    "consequences": [
+        "Final worst credible outcome 1 (no safeguards assumed)",
+        "Final worst credible outcome 2 (e.g., VCE / jet fire)"
+    ],
+    "scenario_comments": "Narrative: cause chain → intermediate effects → final impact",
+    "consequence_category": "PAF",
+    "personnel_exposure": ">14",
+    "drawing_references": [],
+    "mitigation_details": [
+        {
+            "name": "Full descriptive name of the mitigation",
+            "control_category": "Prevention or Detection or Mitigation",
+            "cme_kme": "CME or KME"
+        }
+    ],
+    "responsibility": "Role responsible (e.g., Operations Engineer)",
+    "planned_residual_risk": {
+        "paf": {"consequence": 2, "probability": 1},
+        "pd_lor": {"consequence": 2, "probability": 1},
+        "ecr": {"consequence": 1, "probability": 1}
+    },
+    "worst_credible_scenario": "Single sentence describing worst credible outcome"
+}
+
+Rules:
+- intermediate_consequences: 2-4 immediate physical effects (before final escalation)
+- consequences: 2-4 worst credible final impacts (NO safeguards assumed)
+- scenario_comments: narrative chain from approved causes → intermediate → final impact
+- consequence_category: must be ONE of "PAF", "PD/LOR", "ECR"
+- personnel_exposure: must be ONE of "<5", "5-14", ">14"
+  Use the Production Deck PAF Consequence table in the knowledge context.
+  For a 6-inch leak on a production deck: personnel_exposure is typically ">14" (PEC-1)
+- drawing_references: empty list (drawing number is set separately from P&ID metadata)
+- Apply MANDATORY SAFEGUARD RULES above — these are non-negotiable
+- Use knowledge context to ground your analysis wherever possible
+"""
+        return prompt
 
     async def generate_causes_and_consequences(
         self,

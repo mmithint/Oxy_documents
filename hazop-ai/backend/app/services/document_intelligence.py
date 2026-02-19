@@ -181,6 +181,7 @@ class DocumentIntelligenceService:
             node_name = llm_result.get("node_name") or self._detect_node_name(raw_text) or f"Node from {source_filename}"
             system = llm_result.get("system") or "Hydrocarbon Processing Systems"
             description = llm_result.get("description") or f"Extracted from {source_filename}"
+            drawing_number = llm_result.get("drawing_number")  # e.g. "APC No. 4020(c)"
         else:
             # Regex fallback for text path
             text_equipment = self._detect_equipment(raw_text)
@@ -188,6 +189,7 @@ class DocumentIntelligenceService:
             node_name = self._detect_node_name(raw_text) or f"Node from {source_filename}"
             system = "Hydrocarbon Processing Systems"
             description = f"Regex-extracted from {source_filename}"
+            drawing_number = None
 
         # ---- PATH 2: Vision extraction (NEW) ----
         vision_equipment: list[Equipment] = []
@@ -241,6 +243,7 @@ class DocumentIntelligenceService:
             instruments=instrument_list,
             pid_drawings=[source_filename],
             description=description,
+            drawing_number=drawing_number,
         )
 
         confidence = self._calculate_confidence(equipment_list, instrument_list, raw_text)

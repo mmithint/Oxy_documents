@@ -85,6 +85,7 @@ export interface PIDNode {
   equipment: Equipment[];
   instruments: Instrument[];
   pid_drawings: string[];
+  drawing_number: string | null;
   description: string | null;
   upstream_pressure_psig: number | null;
   validated_by?: string;
@@ -243,6 +244,45 @@ export interface GenerateCausesResponse {
   node_id: string;
   deviation_causes: DeviationCauses[];
   llm_context: LLMContextSummary | null;
+}
+
+// --- Consequence Review Types ---
+
+export interface OverpressureCalc {
+  /** Maximum credible pressure (upstream_pressure_psig from node). */
+  max_credible_pressure: number;
+  /** Equipment design pressure in PSIG. */
+  design_pressure: number;
+  /** Ratio = max_credible / design. */
+  ratio: number;
+  /** True if ratio > 2.0 → vessel rupture assumed. */
+  exceeds_2x: boolean;
+  /** "6 inch" when exceeds_2x, otherwise null. */
+  assumed_leak_size: string | null;
+  /** "Consequence Document, Page 14" when exceeds_2x, otherwise null. */
+  source: string | null;
+}
+
+export interface DeviationConsequences {
+  deviation_id: string;
+  equipment_tag: string;
+  deviation: string;
+  guideword: string;
+  parameter: string;
+  causes: string[];
+  drawing_references: string[];
+  intermediate_consequences: string[];
+  consequences: string[];
+  scenario_comments: string | null;
+  consequence_category: string | null;
+  pec: string | null;
+  overpressure_calc: OverpressureCalc | null;
+}
+
+export interface ConsequenceGenerationResponse {
+  message: string;
+  node_id: string;
+  deviation_consequences: DeviationConsequences[];
 }
 
 export const STATUS_COLORS: Record<ReviewStatus, string> = {

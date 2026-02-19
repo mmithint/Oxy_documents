@@ -165,3 +165,63 @@ class ApproveCausesResponse(BaseModel):
     node_id: str
     deviations_count: int
     approved: bool = True
+
+
+# --- Consequence Review (Pre-Generation SME Step) ---
+
+class OverpressureCalc(BaseModel):
+    """
+    Deterministic overpressure calculation for High Pressure deviations.
+    When max_credible_pressure > 2× design_pressure, vessel rupture (6" leak) is assumed.
+    Source: Consequence Document, Page 14.
+    """
+    max_credible_pressure: float       # upstream_pressure_psig from node
+    design_pressure: float             # equipment.design_pressure
+    ratio: float                       # max_credible / design
+    exceeds_2x: bool                   # ratio > 2.0
+    assumed_leak_size: Optional[str]   # "6 inch" if exceeds_2x
+    source: Optional[str]              # "Consequence Document, Page 14" if exceeds_2x
+
+
+class DeviationConsequencesItem(BaseModel):
+    """Consequences for a single deviation, used in consequence review step."""
+    deviation_id: str
+    equipment_tag: str
+    deviation: str
+    guideword: str
+    parameter: str
+    causes: list[str]                  # from SME-approved causes
+    drawing_references: list[str] = Field(default_factory=list)
+    intermediate_consequences: list[str] = Field(default_factory=list)
+    consequences: list[str] = Field(default_factory=list)
+    scenario_comments: Optional[str] = None
+    consequence_category: Optional[str] = None   # "PAF", "PD/LOR", or "ECR"
+    pec: Optional[str] = None                    # "<5", "5-14", or ">14"
+    overpressure_calc: Optional[OverpressureCalc] = None
+
+
+class GenerateConsequencesRequest(BaseModel):
+    """Request to generate consequences for SME review before full HAZOP generation."""
+    node_id: str
+
+
+class GenerateConsequencesResponse(BaseModel):
+    """Response with generated consequences for SME review."""
+    message: str
+    node_id: str
+    deviation_consequences: list[DeviationConsequencesItem]
+
+
+class ApproveConsequencesRequest(BaseModel):
+    """SME approves/edits consequences before full HAZOP generation."""
+    node_id: str
+    sme_name: str
+    deviation_consequences: list[DeviationConsequencesItem]
+    comments: Optional[str] = None
+
+
+class ApproveConsequencesResponse(BaseModel):
+    message: str
+    node_id: str
+    deviations_count: int
+    approved: bool = True

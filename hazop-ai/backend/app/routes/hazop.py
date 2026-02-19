@@ -22,6 +22,8 @@ from app.models.api_models import (
     HAZOPGenerateRequest, HAZOPGenerateResponse,
     GenerateCausesRequest, GenerateCausesResponse, DeviationCausesItem,
     LLMContextItem, LLMContextSummary,
+    GenerateConsequencesRequest, GenerateConsequencesResponse,
+    DeviationConsequencesItem, OverpressureCalc,
 )
 from app.services.hazop_generator import hazop_generator, hazop_generator_offline
 from app.services.deviation_generator import deviation_generator
@@ -332,6 +334,149 @@ async def generate_causes(request: GenerateCausesRequest):
     )
 
 
+@router.post("/generate-consequences", response_model=GenerateConsequencesResponse)
+async def generate_consequences(request: GenerateConsequencesRequest):
+    """
+    Generate consequence content for each deviation for SME review.
+
+    This runs AFTER cause approval (approve-causes) and BEFORE full HAZOP generation.
+    It uses:
+      - SME-approved causes (from node_data["approved_causes"])
+      - Equipment design pressure + upstream_pressure_psig for overpressure calculation
+      - RAG knowledge context (consequence docs, HSE Risk Assessment, Production Deck table)
+      - LLM to generate intermediate consequences, final consequences, scenario comments,
+        consequence category, PEC, and triggered safeguards (LOC → gas detection,
+        Jet Fire → deluge)
+
+    The generated consequences are stored for SME review before HAZOP generation.
+    """
+    node_data = await cosmos_client.get_node(request.node_id)
+    if not node_data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Node {request.node_id} not found.",
+        )
+
+    node = PIDNode(**node_data)
+    approved_causes = node_data.get("approved_causes", {})
+    deviation_consequences_list: list[DeviationConsequencesItem] = []
+
+    # Rebuild the list of deviations from approved_causes (same key structure)
+    from app.services.deviation_generator import deviation_generator
+    deviations = deviation_generator.generate_deviations_for_node(node)
+
+    for dev in deviations:
+        # Find equipment for this deviation
+        equipment = None
+        for eq in node.equipment:
+            if eq.tag == dev.equipment_tag:
+                equipment = eq
+                break
+
+        equipment_type = equipment.equipment_type if equipment else "Unknown"
+        design_pressure = equipment.design_pressure if equipment else None
+        operating_pressure = equipment.operating_pressure if equipment else None
+        design_temperature = equipment.design_temperature if equipment else None
+
+        # Get approved causes for this deviation (match by equipment_tag + deviation)
+        causes: list[str] = []
+        for _aid, adata in approved_causes.items():
+            if (adata.get("equipment_tag") == dev.equipment_tag
+                    and adata.get("deviation") == dev.deviation):
+                causes = adata.get("causes", [])
+                break
+        if not causes:
+            causes = dev.causes  # fall back to ontology causes
+
+        # Overpressure calculation for High Pressure deviations
+        overpressure_calc: OverpressureCalc | None = None
+        if (dev.guideword.value == "HIGH"
+                and dev.parameter.value == "PRESSURE"
+                and design_pressure
+                and node.upstream_pressure_psig):
+            ratio = node.upstream_pressure_psig / design_pressure
+            exceeds_2x = ratio > 2.0
+            overpressure_calc = OverpressureCalc(
+                max_credible_pressure=node.upstream_pressure_psig,
+                design_pressure=design_pressure,
+                ratio=round(ratio, 2),
+                exceeds_2x=exceeds_2x,
+                assumed_leak_size="6 inch" if exceeds_2x else None,
+                source="Consequence Document, Page 14" if exceeds_2x else None,
+            )
+
+        # RAG: retrieve consequence knowledge context
+        knowledge_context = ""
+        try:
+            knowledge_context = await knowledge_service.retrieve_full_hazop_context(
+                equipment_type=equipment_type,
+                deviation=dev.deviation,
+                limit=5,
+            )
+        except Exception:
+            pass
+
+        # LLM: generate consequence content
+        try:
+            result = await openai_service.generate_consequence_content(
+                equipment_type=equipment_type,
+                equipment_tag=dev.equipment_tag,
+                deviation=dev.deviation,
+                design_pressure=design_pressure,
+                operating_pressure=operating_pressure,
+                upstream_pressure_psig=node.upstream_pressure_psig,
+                design_temperature=design_temperature,
+                approved_causes=causes,
+                overpressure_calc=overpressure_calc.model_dump() if overpressure_calc else None,
+                knowledge_context=knowledge_context if knowledge_context else None,
+                is_special_category=dev.requires_mandatory_sme_review,
+            )
+
+            # Drawing references from node
+            drawing_refs = ([node.drawing_number] if getattr(node, "drawing_number", None) else
+                            result.get("drawing_references", []))
+
+            deviation_consequences_list.append(DeviationConsequencesItem(
+                deviation_id=dev.deviation_id,
+                equipment_tag=dev.equipment_tag,
+                deviation=dev.deviation,
+                guideword=dev.guideword.value,
+                parameter=dev.parameter.value,
+                causes=causes,
+                drawing_references=drawing_refs,
+                intermediate_consequences=result.get("intermediate_consequences", []),
+                consequences=result.get("consequences", []),
+                scenario_comments=result.get("scenario_comments"),
+                consequence_category=result.get("consequence_category"),
+                pec=result.get("personnel_exposure"),
+                overpressure_calc=overpressure_calc,
+            ))
+        except Exception:
+            # LLM failure: return empty consequence fields for SME to fill
+            deviation_consequences_list.append(DeviationConsequencesItem(
+                deviation_id=dev.deviation_id,
+                equipment_tag=dev.equipment_tag,
+                deviation=dev.deviation,
+                guideword=dev.guideword.value,
+                parameter=dev.parameter.value,
+                causes=causes,
+                drawing_references=[node.drawing_number] if getattr(node, "drawing_number", None) else [],
+                overpressure_calc=overpressure_calc,
+            ))
+
+    # Store pending consequences on node for later retrieval
+    node_data["pending_consequences_review"] = [
+        item.model_dump(mode="json") for item in deviation_consequences_list
+    ]
+    await cosmos_client.save_node(node_data)
+
+    return GenerateConsequencesResponse(
+        message=f"Generated consequences for {len(deviation_consequences_list)} deviations",
+        node_id=request.node_id,
+        deviation_consequences=deviation_consequences_list,
+    )
+
+
 @router.post("/generate", response_model=HAZOPGenerateResponse)
 async def generate_hazop(request: HAZOPGenerateRequest):
     """
@@ -359,8 +504,9 @@ async def generate_hazop(request: HAZOPGenerateRequest):
             detail="Node has no equipment. SME must validate equipment list first.",
         )
 
-    # Load SME-approved causes if available
+    # Load SME-approved causes and consequences if available
     approved_causes = node_data.get("approved_causes")
+    approved_consequences = node_data.get("approved_consequences")
 
     # Generate HAZOP
     report = await hazop_generator.generate_full_hazop(
@@ -368,6 +514,7 @@ async def generate_hazop(request: HAZOPGenerateRequest):
         include_recommendations=request.include_recommendations,
         selected_deviation_types=request.selected_deviation_types,
         approved_causes=approved_causes,
+        approved_consequences=approved_consequences,
     )
 
     return HAZOPGenerateResponse(

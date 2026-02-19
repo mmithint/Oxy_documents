@@ -4,6 +4,7 @@ import UploadPanel from "../components/UploadPanel";
 import EquipmentReviewTable from "../components/EquipmentReviewTable";
 import DeviationSelector from "../components/DeviationSelector";
 import CausesReviewTable from "../components/CausesReviewTable";
+import ConsequenceReviewTable from "../components/ConsequenceReviewTable";
 import HazopTable from "../components/HazopTable";
 import ExtractionDetails from "../components/ExtractionDetails";
 import { generateHAZOP, generateHAZOPQuick, getHAZOPByNode, checkBackendConnection } from "../services/api";
@@ -31,7 +32,7 @@ function isSafetyDevice(inst: Instrument): boolean {
   return SAFETY_TYPE_KEYWORDS.some((kw) => inst.instrument_type.toLowerCase().includes(kw));
 }
 
-type WorkflowStep = "upload" | "validate" | "select_deviations" | "review_causes" | "generate" | "review";
+type WorkflowStep = "upload" | "validate" | "select_deviations" | "review_causes" | "review_consequences" | "generate" | "review";
 
 export default function Dashboard() {
   const [step, setStep] = useState<WorkflowStep>("upload");
@@ -85,8 +86,13 @@ export default function Dashboard() {
     setStep("review_causes");
   };
 
-  // Step 4: Causes approved → ready to generate
+  // Step 4: Causes approved → review consequences
   const handleCausesApproved = () => {
+    setStep("review_consequences");
+  };
+
+  // Step 5: Consequences approved → ready to generate
+  const handleConsequencesApproved = () => {
     setStep("generate");
   };
 
@@ -295,6 +301,14 @@ export default function Dashboard() {
               />
             )}
 
+            {step === "review_consequences" && selectedNode && (
+              <ConsequenceReviewTable
+                nodeId={selectedNode.node_id}
+                onApproved={handleConsequencesApproved}
+                onBack={() => setStep("review_causes")}
+              />
+            )}
+
             {step === "generate" && (
               <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
                 <div className="text-gray-400 text-4xl mb-4">HAZOP</div>
@@ -482,11 +496,12 @@ function WorkflowSteps({ currentStep }: { currentStep: WorkflowStep }) {
     { key: "validate", label: "2. Validate Equipment" },
     { key: "select_deviations", label: "3. Select Deviations" },
     { key: "review_causes", label: "4. Review Causes" },
-    { key: "generate", label: "5. Generate HAZOP" },
-    { key: "review", label: "6. SME Review" },
+    { key: "review_consequences", label: "5. Review Consequences" },
+    { key: "generate", label: "6. Generate HAZOP" },
+    { key: "review", label: "7. SME Review" },
   ];
 
-  const stepOrder: WorkflowStep[] = ["upload", "validate", "select_deviations", "review_causes", "generate", "review"];
+  const stepOrder: WorkflowStep[] = ["upload", "validate", "select_deviations", "review_causes", "review_consequences", "generate", "review"];
   const currentIndex = stepOrder.indexOf(currentStep);
 
   return (

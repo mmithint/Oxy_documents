@@ -26,6 +26,7 @@ from app.models.api_models import (
     ReviewRequest, ReviewResponse,
     DeviationEditRequest, DeviationEditResponse,
     ApproveCausesRequest, ApproveCausesResponse,
+    ApproveConsequencesRequest, ApproveConsequencesResponse,
 )
 from app.database.cosmos_client import cosmos_client
 
@@ -126,6 +127,57 @@ async def approve_causes(request: ApproveCausesRequest):
         message=f"Causes approved by {request.sme_name} for {len(request.deviation_causes)} deviations",
         node_id=request.node_id,
         deviations_count=len(request.deviation_causes),
+        approved=True,
+    )
+
+
+# --- Consequence Review (Pre-Generation Step) ---
+
+@router.post("/approve-consequences", response_model=ApproveConsequencesResponse)
+async def approve_consequences(request: ApproveConsequencesRequest):
+    """
+    SME approves/edits consequences for all deviations before full HAZOP generation.
+
+    The approved consequences are stored on the node document and will be used
+    as-is during HAZOP generation (LLM will not overwrite consequence fields).
+    """
+    node_data = await cosmos_client.get_node(request.node_id)
+    if not node_data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Node {request.node_id} not found",
+        )
+
+    # Build approved_consequences dict keyed by deviation_id
+    approved_consequences = {}
+    for item in request.deviation_consequences:
+        approved_consequences[item.deviation_id] = {
+            "equipment_tag": item.equipment_tag,
+            "deviation": item.deviation,
+            "guideword": item.guideword,
+            "parameter": item.parameter,
+            "causes": item.causes,
+            "drawing_references": item.drawing_references,
+            "intermediate_consequences": item.intermediate_consequences,
+            "consequences": item.consequences,
+            "scenario_comments": item.scenario_comments,
+            "consequence_category": item.consequence_category,
+            "pec": item.pec,
+            "approved_by": request.sme_name,
+            "approved_at": datetime.utcnow().isoformat(),
+        }
+
+    node_data["approved_consequences"] = approved_consequences
+    node_data["consequences_approved_by"] = request.sme_name
+    node_data["consequences_approved_at"] = datetime.utcnow().isoformat()
+    node_data["consequences_approval_comments"] = request.comments
+
+    await cosmos_client.save_node(node_data)
+
+    return ApproveConsequencesResponse(
+        message=f"Consequences approved by {request.sme_name} for {len(request.deviation_consequences)} deviations",
+        node_id=request.node_id,
+        deviations_count=len(request.deviation_consequences),
         approved=True,
     )
 
