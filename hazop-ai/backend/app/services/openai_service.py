@@ -87,7 +87,10 @@ and provide its full descriptive type name based on ISA/industry standards.
 
 Common equipment examples (NOT exhaustive — use whatever fits):
   Separator, Header, Compressor, Pump, Heat Exchanger, Vessel, Tank, Scrubber,
-  Knockout Drum, Flare, Column, Reactor, Filter, Mixer, etc.
+  Knockout Drum, Flare, Column, Reactor, Filter, Mixer, Piping, etc.
+
+IMPORTANT: Use "Piping" (not "Pipeline" or "pipe") for any pipeline, piping segment,
+or flow line identified on the drawing.
 
 Common instrument examples (NOT exhaustive — use whatever fits):
   Pressure Switch High High, Pressure Safety Valve, Pressure Control Valve,
@@ -109,6 +112,37 @@ Return JSON in this exact format:
     "system": "Parent system name (e.g. Hydrocarbon Processing Systems)",
     "description": "Brief description of what this P&ID covers",
     "drawing_number": "APC No. 4020(c)",
+    "pid_summary": "2-3 sentence summary of what this P&ID shows overall — the main equipment, its purpose, and key process conditions",
+    "flow_description": "Step-by-step description of the process flow: what streams enter, what processing or separation occurs in each vessel, and where the outlet streams go. Include fluid types (oil, gas, water) and flow direction.",
+    "line_connectivity": [
+        {
+            "from_tag": "V-1210",
+            "to_tag": "P-1210",
+            "line_id": "6\"-1210-A",
+            "fluid_phase": "liquid",
+            "pipe_size": "6-inch",
+            "description": "V-1210 liquid outlet to P-1210 suction"
+        }
+    ],
+    "control_loops": [
+        {
+            "loop_id": "LC-1210",
+            "controlled_variable": "Level",
+            "measuring_element": "LT-1210",
+            "controller": "LIC-1210",
+            "final_element": "LCV-1210",
+            "controlled_equipment": "V-1210",
+            "description": "Level control: LT-1210 measures level in V-1210, LIC-1210 controls LCV-1210 to maintain setpoint"
+        }
+    ],
+    "deviation_locations": [
+        {
+            "equipment_tag": "V-1210",
+            "susceptible_deviations": ["High Pressure", "Low Level", "High Level"],
+            "drawing_reference": "4020-001",
+            "location_description": "Main separator — pressure-containing vessel with level and pressure instruments"
+        }
+    ],
     "equipment": [
         {
             "tag": "V-1210",
@@ -137,7 +171,12 @@ Rules:
 - Do NOT invent tags that aren't in the text
 - Pressure values are typically in PSIG, temperature in °F
 - For drawing_number: look in the title block for "APC No.", "Drawing No.", "DWG No.", or similar
-  reference labels. Extract the full value as-is (e.g. "APC No. 4020(c)"). Use null if not found."""
+  reference labels. Extract the full value as-is (e.g. "APC No. 4020(c)"). Use null if not found.
+- For pid_summary: concise 2-3 sentences covering the main purpose and key equipment on this drawing.
+- For flow_description: trace the full process path — inlet, processing steps through each vessel, and outlet destinations. Be specific about fluid phases (oil/gas/water) and routing.
+- For line_connectivity: identify pipe connections between equipment using piping notation in the text. Each entry needs from_tag and to_tag. Include line_id if a line number is visible.
+- For control_loops: identify control loops from instrument tags. A loop typically has a transmitter (LT/PT/FT/TT), a controller (LIC/PIC/FIC/TIC), and a control valve (LCV/PCV/FCV/TCV). Each loop must have final_element and controlled_equipment.
+- For deviation_locations: for each piece of equipment, list which standard HAZOP deviation types apply. Use: "High Pressure", "Low Pressure", "High Level", "Low Level", "High Temperature", "Low Temperature", "No/Low Flow", "More/High Flow", "Reverse / Misdirected Flow"."""
 
         user_prompt = f"""Extract all equipment and instruments from this P&ID OCR text.
 
@@ -166,6 +205,182 @@ OCR Text:
                 "node_name": "",
                 "system": "Hydrocarbon Processing Systems",
                 "description": "",
+                "equipment": [],
+                "instruments": [],
+            }
+
+    # ------------------------------------------------------------------
+    # P&ID DXF EXTRACTION — Direct CAD Entity Extraction (DWG uploads)
+    # ------------------------------------------------------------------
+
+    async def extract_pid_from_dxf_entities(
+        self,
+        entity_text: str,
+        source_filename: str,
+    ) -> dict:
+        """
+        Extract equipment and instruments from DXF text entities.
+
+        Unlike extract_pid_data() which works on noisy OCR text, this method
+        receives structured CAD data: text strings with x/y coordinates and
+        layer names, extracted directly from the DWG file.  The text is exact —
+        no OCR errors, no image quality concerns.
+
+        Args:
+            entity_text : Output of dxf_extractor.format_entities_for_llm()
+                          — entities grouped by layer, each with coordinates.
+            source_filename : Original DWG/DXF filename for context.
+
+        Returns:
+            Dict matching the extract_pid_data() schema:
+            {node_name, system, description, drawing_number, equipment[], instruments[]}
+        """
+        system_prompt = """You are an expert oil & gas process engineer reading structured CAD data extracted directly from a P&ID DWG file.
+
+The input is NOT OCR text — it is exact text entities read from the DWG's internal data structure.
+Each entity has:
+  - The exact text string (no OCR errors — what you see is exactly what is in the drawing)
+  - x, y coordinates (the entity's position on the drawing canvas)
+  - Layer name (the CAD layer this entity lives on — use this to classify entity type)
+
+Your task is to identify ALL equipment tags and instrument tags from these entities.
+
+HOW TO USE THE DATA:
+1. Layer names hint at entity type:
+   - Layers containing "EQUIP", "VESSEL", "PUMP", etc. → equipment tags
+   - Layers containing "INSTR", "INSTRUMENT", "TAG" → instrument tags
+   - Layers containing "TEXT", "ANNO", "NOTE", "TITLE", "BORDER" → likely non-tag text
+   - When layer names are ambiguous (e.g. "0", "GENERAL"), use the text pattern itself
+
+2. Tag patterns (ISA standard):
+   Equipment : V-####, D-####, E-####, P-####, C-####, K-####, T-####, HDR-####,
+               FL-####, S-####, KO-#### (2-5 letters, dash, 3-5 digits)
+   Instruments: PSHH-####, PSH-####, PSV-####, PCV-####, PT-####, PI-####,
+                LSHH-####, LSH-####, LSLL-####, LCV-####, LT-####, LG-####,
+                TSH-####, TT-####, TI-####, FCV-####, FT-####, SDV-####,
+                BDV-####, GD-####, FD-####, and many others
+
+3. Spatial proximity — use x/y coordinates to associate instruments with equipment:
+   - An instrument tag near (within ~100 coordinate units of) an equipment tag
+     is likely associated with that equipment
+   - Shared numeric suffix is the strongest association signal
+     (e.g., PSHH-1210 → V-1210)
+
+4. The drawing_number is usually in a title block — look for entities on layers
+   named "TITLEBLOCK", "TITLE", "BORDER", "FRAME", or similar, or for text matching
+   patterns like "APC No.", "DWG No.", "Drawing No.", followed by alphanumerics.
+
+IMPORTANT:
+- Do NOT invent tags. Only report text strings that actually appear in the entity list.
+- Exact text means exact — "V-1210" in the DXF is "V-1210", not "V-l210" or "V 1210".
+- Non-tag text (pipe specs, notes, dimensions, revision marks, title text) should be
+  ignored — focus only on equipment and instrument tags.
+- Use "Piping" (not "Pipeline") for any pipeline or flow line.
+
+Return JSON in this exact format:
+{
+    "node_name": "Descriptive name of the P&ID node/system",
+    "system": "Parent system name (e.g. Hydrocarbon Processing Systems)",
+    "description": "Brief description of what this P&ID covers",
+    "drawing_number": "APC No. 4020(c) or null",
+    "pid_summary": "2-3 sentence summary of what this P&ID shows overall — the main equipment, its purpose, and key process conditions inferred from the tags and text",
+    "flow_description": "Step-by-step description of the process flow inferred from the equipment tags and text entities: what streams enter, what processing or separation occurs in each vessel, and where the outlet streams go. Include fluid types (oil, gas, water) and flow direction.",
+    "line_connectivity": [
+        {
+            "from_tag": "V-1210",
+            "to_tag": "P-1210",
+            "line_id": null,
+            "fluid_phase": "liquid",
+            "pipe_size": null,
+            "description": "V-1210 liquid outlet to P-1210 suction"
+        }
+    ],
+    "control_loops": [
+        {
+            "loop_id": "LC-1210",
+            "controlled_variable": "Level",
+            "measuring_element": "LT-1210",
+            "controller": "LIC-1210",
+            "final_element": "LCV-1210",
+            "controlled_equipment": "V-1210",
+            "description": "Level control loop on V-1210"
+        }
+    ],
+    "deviation_locations": [
+        {
+            "equipment_tag": "V-1210",
+            "susceptible_deviations": ["High Pressure", "Low Level", "High Level"],
+            "drawing_reference": null,
+            "location_description": "Pressure vessel with level and pressure instruments"
+        }
+    ],
+    "equipment": [
+        {
+            "tag": "V-1210",
+            "name": "HP Oil Production Separator No. 2",
+            "equipment_type": "Separator",
+            "design_pressure": null,
+            "design_temperature": null,
+            "operating_pressure": null,
+            "operating_temperature": null
+        }
+    ],
+    "instruments": [
+        {
+            "tag": "PSHH-1210",
+            "instrument_type": "Pressure Switch High High",
+            "setpoint": null,
+            "associated_equipment_tag": "V-1210"
+        }
+    ]
+}
+
+Rules:
+- Extract EVERY equipment tag and instrument tag present in the entity list
+- Use null for numeric values (design_pressure, setpoint, etc.) — they are rarely
+  in the text entities; the SME will fill them in during review
+- Do NOT skip tags — if you see a tag pattern, include it
+- associated_equipment_tag: use shared numeric suffix or spatial proximity
+- drawing_number: extract from title-block entities if identifiable, else null
+- For pid_summary: describe the overall purpose of this P&ID based on the tags and any descriptive text you see.
+- For flow_description: infer the process flow from equipment tag names, types, and any piping notation in the text entities.
+- For line_connectivity: infer connections from equipment tag names (e.g., separator outlet → pump inlet) and any piping notation visible. Use null for line_id/pipe_size if not in the data.
+- For control_loops: identify loops from transmitter (LT/PT/FT/TT), controller (LIC/PIC/FIC/TIC), control valve (LCV/PCV/FCV/TCV) tag groupings using shared numeric suffixes.
+- For deviation_locations: for each equipment, list applicable standard deviation types: "High Pressure", "Low Pressure", "High Level", "Low Level", "High Temperature", "Low Temperature", "No/Low Flow", "More/High Flow", "Reverse / Misdirected Flow"."""
+
+        user_prompt = f"""Extract all equipment and instrument tags from this DXF entity data.
+
+Source file: {source_filename}
+
+DXF Text Entities (grouped by CAD layer, with x/y coordinates):
+{entity_text}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=settings.AZURE_OPENAI_DEPLOYMENT,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                max_tokens=4000,
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content
+            result = json.loads(content)
+            print(
+                f"[DXF LLM] Extraction complete for {source_filename}: "
+                f"{len(result.get('equipment', []))} equipment, "
+                f"{len(result.get('instruments', []))} instruments"
+            )
+            return result
+        except Exception as exc:
+            print(f"[DXF LLM] Extraction failed: {exc}")
+            return {
+                "node_name": "",
+                "system": "Hydrocarbon Processing Systems",
+                "description": "",
+                "drawing_number": None,
                 "equipment": [],
                 "instruments": [],
             }
@@ -220,6 +435,37 @@ IMPORTANT:
 
 Return JSON in this exact format:
 {
+    "pid_summary": "2-3 sentence summary of what this P&ID shows overall — the main equipment, its purpose, and key process conditions visible on the diagram",
+    "flow_description": "Step-by-step description of the process flow visible in this diagram: what streams enter (from where), what happens inside each vessel, and where the outlet streams go. Include fluid phases (oil, gas, water) and flow direction as shown by the piping arrows.",
+    "line_connectivity": [
+        {
+            "from_tag": "V-1210",
+            "to_tag": "P-1210",
+            "line_id": "6\"-1210-A",
+            "fluid_phase": "liquid",
+            "pipe_size": "6-inch",
+            "description": "V-1210 liquid outlet to P-1210 suction"
+        }
+    ],
+    "control_loops": [
+        {
+            "loop_id": "LC-1210",
+            "controlled_variable": "Level",
+            "measuring_element": "LT-1210",
+            "controller": "LIC-1210",
+            "final_element": "LCV-1210",
+            "controlled_equipment": "V-1210",
+            "description": "Level control: LT-1210 measures level in V-1210, LIC-1210 controls LCV-1210 to maintain setpoint"
+        }
+    ],
+    "deviation_locations": [
+        {
+            "equipment_tag": "V-1210",
+            "susceptible_deviations": ["High Pressure", "Low Level", "High Level"],
+            "drawing_reference": "4020-001",
+            "location_description": "Main separator — contains high-pressure gas and liquid phases, susceptible to overpressure and level excursions"
+        }
+    ],
     "equipment": [
         {
             "tag": "V-1210",
@@ -246,7 +492,12 @@ Rules:
 - Associate instruments with their connected equipment using visual connections or shared numeric suffixes
 - Use null for values you cannot read from the image
 - Do NOT invent tags — only report what you actually see
-- If text is partially readable, include your best interpretation"""
+- If text is partially readable, include your best interpretation
+- For pid_summary: describe what you see on this P&ID — the main vessels, their purpose, and overall process.
+- For flow_description: follow the piping arrows and describe the full flow path from inlet to outlet, naming each vessel and the fluid type at each stage.
+- For line_connectivity: follow the piping lines (arrowed pipes) on the diagram. For each visible pipe connection between two identifiable tags, record from_tag → to_tag, the line_id label if shown, the fluid phase (gas/liquid/two-phase as visible from notes or symbols), and a short description. Only include connections where both from_tag and to_tag are visible.
+- For control_loops: identify ISA control loop bubbles. For each loop, find the measuring element (LT/PT/FT/TT-xxx), the controller bubble (LIC/PIC/FIC/TIC-xxx), and the final control element (LCV/PCV/FCV/TCV-xxx). Note the controlled equipment and the controlled variable (Level, Pressure, Flow, Temperature).
+- For deviation_locations: for each piece of equipment, identify which HAZOP deviation types apply based on the visible instruments, fluid types, and equipment function. Use standard names: "High Pressure", "Low Pressure", "High Level", "Low Level", "High Temperature", "Low Temperature", "No/Low Flow", "More/High Flow", "Reverse / Misdirected Flow"."""
 
         # Build message content with images
         content: list[dict] = []
@@ -306,10 +557,14 @@ Rules:
         operating_pressure: float | None = None,
         upstream_pressure_psig: float | None = None,
         existing_safeguards: list[str] | None = None,
-        knowledge_context: str | None = None,
         is_special_category: bool = False,
         node_instruments: list[dict] | None = None,
         node_equipment: list[dict] | None = None,
+        pid_summary: str | None = None,
+        flow_description: str | None = None,
+        line_connectivity: list[dict] | None = None,
+        control_loops: list[dict] | None = None,
+        deviation_locations: list[dict] | None = None,
     ) -> dict:
         """
         Generate full HAZOP deviation content: causes, consequences,
@@ -317,7 +572,8 @@ Rules:
         recommendations, responsibility, planned residual risk.
 
         Uses a single expanded LLM call with structured JSON output.
-        Knowledge context from RAG is injected to ground the response.
+        Causes are grounded ONLY in P&ID information (equipment, instruments,
+        line connectivity, control loops) — no external knowledge base used.
 
         Args:
             equipment_type: Type of equipment (e.g., "Separator")
@@ -326,8 +582,10 @@ Rules:
             design_pressure: Design pressure if known
             design_temperature: Design temperature if known
             existing_safeguards: List of safeguard descriptions already detected
-            knowledge_context: Retrieved knowledge chunks for grounding
             is_special_category: True for Human Factors / Previous Incidents
+            line_connectivity: Pipe connections from P&ID extraction
+            control_loops: Control loops from P&ID extraction
+            deviation_locations: Deviation-to-equipment mapping from P&ID
 
         Returns:
             Dict with all HAZOP fields
@@ -342,10 +600,14 @@ Rules:
             operating_pressure=operating_pressure,
             upstream_pressure_psig=upstream_pressure_psig,
             existing_safeguards=existing_safeguards,
-            knowledge_context=knowledge_context,
             is_special_category=is_special_category,
             node_instruments=node_instruments,
             node_equipment=node_equipment,
+            pid_summary=pid_summary,
+            flow_description=flow_description,
+            line_connectivity=line_connectivity,
+            control_loops=control_loops,
+            deviation_locations=deviation_locations,
         )
 
         response = self.client.chat.completions.create(
@@ -399,9 +661,12 @@ Rules:
         approved_causes: list[str] | None = None,
         pressure_ratio: float | None = None,
         overpressure_table_context: str | None = None,
+        pec_table_context: str | None = None,
         knowledge_context: str | None = None,
         is_special_category: bool = False,
-        node_instruments: list[dict] | None = None,
+        pid_instruments: list[dict] | None = None,
+        pid_summary: str | None = None,
+        flow_description: str | None = None,
     ) -> dict:
         """
         Generate HAZOP consequence fields ONLY — causes are already SME-approved.
@@ -430,9 +695,12 @@ Rules:
             approved_causes=approved_causes,
             pressure_ratio=pressure_ratio,
             overpressure_table_context=overpressure_table_context,
+            pec_table_context=pec_table_context,
             knowledge_context=knowledge_context,
             is_special_category=is_special_category,
-            node_instruments=node_instruments,
+            pid_instruments=pid_instruments,
+            pid_summary=pid_summary,
+            flow_description=flow_description,
         )
 
         system_prompt = """You are a senior process safety engineer generating HAZOP consequence
@@ -478,9 +746,12 @@ Rules:
         approved_causes: list[str] | None,
         pressure_ratio: float | None,
         overpressure_table_context: str | None,
+        pec_table_context: str | None,
         knowledge_context: str | None,
         is_special_category: bool,
-        node_instruments: list[dict] | None,
+        pid_instruments: list[dict] | None,
+        pid_summary: str | None = None,
+        flow_description: str | None = None,
     ) -> str:
         prompt = f"""Generate HAZOP consequence analysis for this deviation.
 Causes have already been approved by the SME — focus on consequences only.
@@ -489,6 +760,10 @@ Equipment Type: {equipment_type}
 Equipment Tag: {equipment_tag}
 Deviation: {deviation}
 """
+        if pid_summary:
+            prompt += f"\nP&ID Overview: {pid_summary}\n"
+        if flow_description:
+            prompt += f"Process Flow: {flow_description}\n"
         if design_pressure:
             prompt += f"Design Pressure: {design_pressure} PSIG\n"
         if operating_pressure:
@@ -535,12 +810,54 @@ OVERPRESSURE CALCULATION:
                 "and include jet fire as an escalation consequence in scenario_comments.\n"
             )
 
-        if node_instruments:
-            prompt += "\nInstruments on this equipment (for safeguard context):\n"
-            for inst in node_instruments:
+        if pid_instruments:
+            prompt += (
+                "\nP&ID Instruments on this equipment (for consequence context — "
+                "these are safeguards and instruments present on the P&ID; assume they "
+                "may fail or be unavailable when assessing worst-credible consequences):\n"
+            )
+            for inst in pid_instruments:
                 tag = inst.get("tag", "")
                 itype = inst.get("instrument_type", "")
-                prompt += f"  - {tag} ({itype})\n"
+                pid_ref = inst.get("pid_reference", "")
+                line = f"  - {tag} ({itype})"
+                if pid_ref:
+                    line += f" [P&ID: {pid_ref}]"
+                prompt += line + "\n"
+        else:
+            prompt += "\nNo instruments found on P&ID for this equipment.\n"
+
+        # PEC table lookup — pressure (x-axis) × hole size (y-axis) → PEC number
+        system_pressure = upstream_pressure_psig or design_pressure
+        prompt += f"\n--- PEC LOOKUP (Personnel Exposure Count) ---\n"
+        prompt += f"  System pressure from P&ID diagram: {system_pressure} PSIG\n"
+        if pressure_ratio is not None:
+            prompt += (
+                "  Hole size: use the hole_size value you determine in overpressure_result "
+                "(from the Pressure Significance Table above).\n"
+            )
+        else:
+            prompt += "  Hole size: estimate from deviation severity and consequence type.\n"
+
+        if pec_table_context:
+            prompt += (
+                "\nProduction-Deck PAF Consequence Table (from knowledge documents — "
+                "x-axis = pressure in PSIG rows, y-axis = hole size in inches columns):\n"
+                f"{pec_table_context}\n\n"
+                "Lookup steps:\n"
+                f"  1. Find the row matching the system pressure ({system_pressure} PSIG)\n"
+                "  2. Find the column matching the hole size\n"
+                "  3. Cell at intersection = PEC number (e.g., PEC-1, PEC-2, PEC-3)\n"
+                "  4. Determine current_risk from the table for that PEC:\n"
+                "       PEC-1 → current_risk = 'C5'\n"
+                "       All other PEC values: read the current risk from the same table row.\n"
+            )
+        else:
+            prompt += (
+                "The PEC table was not retrieved from the knowledge base. "
+                "Estimate PEC from the scenario severity and consequence type.\n"
+                "If PEC-1: current_risk = 'C5'. Otherwise estimate from risk matrix.\n"
+            )
 
         if knowledge_context:
             prompt += (
@@ -571,10 +888,11 @@ Return JSON in this exact format:
     ],
     "scenario_comments": "Narrative: cause chain → intermediate effects → final impact",
     "consequence_category": "PAF",
-    "personnel_exposure": ">14",
+    "pec": "PEC-1",
+    "current_risk": "C5",
     "drawing_references": [],
     "overpressure_result": {
-        "hole_size": "Hole size from table (e.g., '6-inches (150 mm)'), or null if not a pressure deviation",
+        "hole_size": "Hole size from Pressure Significance Table (e.g., '6-inches (150 mm)'), or null",
         "significance": "Significance text from table (e.g., 'Stresses greater than yield strength'), or null",
         "consequence_description": "Consequence text from table (e.g., 'Potential for permanent deformation and vessel rupture'), or null",
         "is_vessel_rupture": false,
@@ -601,8 +919,10 @@ Rules:
 - consequences: 2-4 worst credible final impacts (NO safeguards assumed)
 - scenario_comments: narrative chain from approved causes → intermediate → final impact
 - consequence_category: must be ONE of "PAF", "PD/LOR", "ECR"
-- personnel_exposure: must be ONE of "<5", "5-14", ">14"
-  Use the Production Deck PAF Consequence table in the knowledge context.
+- pec: PEC number from the Production-Deck PAF Consequence table lookup
+  (e.g., "PEC-1", "PEC-2", "PEC-3"). Use pressure (x-axis) × hole size (y-axis).
+- current_risk: if pec = "PEC-1" → "C5"; for all other PEC values read from the table.
+  Format: letter + number, e.g. "C5", "D4". Never leave null if pec is populated.
 - overpressure_result: populate ONLY for High Pressure deviations where a ratio was provided.
   Set all fields to null for other deviation types.
   hole_size, significance, consequence_description MUST come from the Pressure Significance
@@ -610,6 +930,188 @@ Rules:
 - drawing_references: empty list (drawing number is set separately from P&ID metadata)
 - Apply MANDATORY SAFEGUARD RULES above — these are non-negotiable
 - Use knowledge context to ground your analysis wherever possible
+"""
+        return prompt
+
+    async def generate_safeguard_content(
+        self,
+        equipment_type: str,
+        equipment_tag: str,
+        deviation: str,
+        approved_causes: list[str],
+        approved_consequences: list[str],
+        pid_instruments: list[dict],
+        cme_knowledge_context: str | None,
+    ) -> dict:
+        """
+        Generate enriched safeguard entries for SME review.
+
+        PR classification, CME/KME designation, CME Name, and CME ID are determined
+        entirely by the LLM reading the HSE Risk Assessment knowledge document.
+        Nothing is hardcoded — the document is the single source of truth.
+
+        Args:
+            equipment_type: Equipment type (e.g. "Separator")
+            equipment_tag: Equipment tag (e.g. "MBD-1010")
+            deviation: Deviation description (e.g. "High Pressure")
+            approved_causes: SME-approved causes for this deviation
+            approved_consequences: SME-approved final consequences
+            pid_instruments: Raw instruments matched to this equipment
+                             [{tag, instrument_type, pid_reference}]
+            cme_knowledge_context: HSE Risk Assessment doc chunks from RAG
+
+        Returns dict with:
+            safeguards: list of enriched safeguard dicts
+        """
+        prompt = self._build_safeguard_prompt(
+            equipment_type=equipment_type,
+            equipment_tag=equipment_tag,
+            deviation=deviation,
+            approved_causes=approved_causes,
+            approved_consequences=approved_consequences,
+            pid_instruments=pid_instruments,
+            cme_knowledge_context=cme_knowledge_context,
+        )
+
+        system_prompt = (
+            "You are a senior HAZOP engineer specialising in safety barrier analysis. "
+            "Your task is to classify safeguards (CME/KME) for a HAZOP deviation. "
+            "You MUST determine PR classification, CME/KME type, CME Name, and CME ID "
+            "ONLY from the HSE Risk Assessment knowledge document provided. "
+            "Do NOT rely on your own training data for classification — use the document."
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=settings.AZURE_OPENAI_DEPLOYMENT,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content or "{}"
+            result = json.loads(content)
+            return result
+        except Exception as e:
+            print(f"[OpenAI] generate_safeguard_content error: {e}")
+            # Fallback: return raw instruments as minimal safeguards
+            return {
+                "safeguards": [
+                    {
+                        "instrument_tag": inst["tag"],
+                        "description": (
+                            f"{inst['instrument_type']} ({inst['tag']})"
+                            if inst.get("instrument_type", "Other") != "Other"
+                            else inst["tag"]
+                        ),
+                        "pr_classification": "Other",
+                        "mitigation_type": None,
+                        "pid_reference": inst.get("pid_reference"),
+                        "control_category": None,
+                        "cme_name": None,
+                        "cme_id": None,
+                    }
+                    for inst in pid_instruments
+                ]
+            }
+
+    def _build_safeguard_prompt(
+        self,
+        equipment_type: str,
+        equipment_tag: str,
+        deviation: str,
+        approved_causes: list[str],
+        approved_consequences: list[str],
+        pid_instruments: list[dict],
+        cme_knowledge_context: str | None,
+    ) -> str:
+        prompt = f"""Classify the safeguards (CME/KME) for this HAZOP deviation.
+Use ONLY the HSE Risk Assessment knowledge document provided to determine PR classification,
+CME/KME type, CME Name, and CME ID. Do not use your own training knowledge for classification.
+
+Equipment Type: {equipment_type}
+Equipment Tag: {equipment_tag}
+Deviation: {deviation}
+"""
+        if approved_causes:
+            prompt += "\nApproved Causes:\n"
+            for c in approved_causes:
+                prompt += f"  - {c}\n"
+
+        if approved_consequences:
+            prompt += "\nApproved Consequences:\n"
+            for c in approved_consequences:
+                prompt += f"  - {c}\n"
+
+        if pid_instruments:
+            prompt += "\nSafety Instruments detected on this equipment from P&ID:\n"
+            for inst in pid_instruments:
+                tag = inst.get("tag", "")
+                itype = inst.get("instrument_type", "")
+                pid_ref = inst.get("pid_reference", "")
+                prompt += f"  - {tag} ({itype})"
+                if pid_ref:
+                    prompt += f" [P&ID: {pid_ref}]"
+                prompt += "\n"
+        else:
+            prompt += "\nNo safety instruments detected on this equipment from P&ID.\n"
+
+        if cme_knowledge_context:
+            prompt += (
+                f"\nHSE Risk Assessment Knowledge Document (use this to classify safeguards):\n"
+                f"{cme_knowledge_context}\n"
+            )
+        else:
+            prompt += (
+                "\nNo HSE Risk Assessment document was retrieved. "
+                "Classify based on standard HAZOP engineering practice.\n"
+            )
+
+        prompt += """
+MANDATORY SAFEGUARD RULES (add these if not already in the P&ID instruments list):
+- If consequences include Loss of Containment, hydrocarbon release, pressurized leak,
+  or vessel rupture: ADD a gas detection safeguard:
+    instrument_tag: "Gas Detection System"
+    description: "Gas detection (2 detectors at 20% LEL or 1 at 45% LEL — triggers
+                  closure of BSDV and XV on each subsea flowline, and SSV and SDV
+                  on each dry tree well)"
+  (classify using knowledge document)
+
+- If consequences include Jet Fire: ADD a deluge safeguard:
+    instrument_tag: "TSE / Deluge"
+    description: "Deluge activated by TSE (Thermal Sensing Element)"
+  (classify using knowledge document)
+
+Return JSON in this exact format:
+{
+    "safeguards": [
+        {
+            "instrument_tag": "PSHH-1010",
+            "description": "Full description of what this safeguard does and how it protects",
+            "pr_classification": "PR-1",
+            "mitigation_type": "CME",
+            "pid_reference": "4020",
+            "control_category": "Prevention",
+            "cme_name": "Safety Instrumented System / ESD (from HSE doc)",
+            "cme_id": "CME-001"
+        }
+    ]
+}
+
+Rules:
+- description: write what the instrument DOES as a safeguard (e.g., "PSHH-1010 closes BSDV on
+  each affected flowline and SSV/SDV on each dry tree well on high pressure signal")
+- pr_classification: MUST come from the HSE Risk Assessment document — read the table
+- mitigation_type: "CME" or "KME" — from HSE doc
+- pid_reference: use the value from the P&ID instrument data if provided, else null
+- control_category: "Prevention", "Detection", or "Mitigation" — from HSE doc
+- cme_name: full CME name as written in the HSE Risk Assessment document
+- cme_id: unique CME identifier from the CME register table in the document (e.g. "CME-001")
+- Include ALL P&ID instruments listed above plus any MANDATORY safeguards required by consequences
+- Do NOT include non-safety instruments (transmitters, indicators, control valves) as safeguards
 """
         return prompt
 
@@ -808,10 +1310,14 @@ Rules:
         operating_pressure: float | None = None,
         upstream_pressure_psig: float | None = None,
         existing_safeguards: list[str] | None = None,
-        knowledge_context: str | None = None,
         is_special_category: bool = False,
         node_instruments: list[dict] | None = None,
         node_equipment: list[dict] | None = None,
+        pid_summary: str | None = None,
+        flow_description: str | None = None,
+        line_connectivity: list[dict] | None = None,
+        control_loops: list[dict] | None = None,
+        deviation_locations: list[dict] | None = None,
     ) -> str:
         prompt = f"""Generate complete HAZOP deviation content for this deviation.
 
@@ -819,6 +1325,10 @@ Equipment Type: {equipment_type}
 Equipment Tag: {equipment_tag}
 Deviation: {deviation}
 """
+        if pid_summary:
+            prompt += f"\nP&ID Overview: {pid_summary}\n"
+        if flow_description:
+            prompt += f"Process Flow: {flow_description}\n"
 
         if design_pressure:
             prompt += f"Design Pressure: {design_pressure} PSIG\n"
@@ -872,6 +1382,44 @@ Deviation: {deviation}
         if existing_safeguards:
             prompt += f"\nKnown Safeguards (for context only, NOT for consequence evaluation): {json.dumps(existing_safeguards)}\n"
 
+        # Inject P&ID line connectivity
+        if line_connectivity:
+            prompt += "\nProcess Connections (from P&ID):\n"
+            for lc in line_connectivity:
+                from_t = lc.get("from_tag", "")
+                to_t = lc.get("to_tag", "")
+                desc = lc.get("description") or f"{from_t} → {to_t}"
+                phase = lc.get("fluid_phase") or ""
+                size = lc.get("pipe_size") or ""
+                detail = ", ".join(x for x in [phase, size] if x)
+                prompt += f"  - {desc}" + (f" ({detail})" if detail else "") + "\n"
+
+        # Inject control loop information
+        if control_loops:
+            prompt += "\nControl Loops (from P&ID):\n"
+            for cl in control_loops:
+                var = cl.get("controlled_variable", "")
+                me = cl.get("measuring_element") or "?"
+                ctrl = cl.get("controller") or "?"
+                fe = cl.get("final_element", "?")
+                eq = cl.get("controlled_equipment", "?")
+                prompt += f"  - {var} loop: {me} → {ctrl} → {fe} on {eq}\n"
+                if cl.get("description"):
+                    prompt += f"    ({cl['description']})\n"
+
+        # Inject deviation location context for the current equipment
+        if deviation_locations:
+            for dl in deviation_locations:
+                if dl.get("equipment_tag") == equipment_tag:
+                    devs = dl.get("susceptible_deviations") or []
+                    loc_desc = dl.get("location_description") or ""
+                    if devs:
+                        prompt += f"\nDeviation Location Context for {equipment_tag}:\n"
+                        prompt += f"  Susceptible to: {', '.join(devs)}\n"
+                        if loc_desc:
+                            prompt += f"  Location: {loc_desc}\n"
+                    break
+
         # Special instructions for Human Factors and Previous Incidents
         if is_special_category and "Human Factors" in deviation:
             prompt += """
@@ -896,9 +1444,6 @@ Focus on:
 Causes should be based on known historical failure patterns.
 Consequences should reflect actual incident outcomes from industry experience.
 """
-
-        if knowledge_context:
-            prompt += f"\nRelevant Knowledge Context (from company documents):\n{knowledge_context}\n"
 
         prompt += """
 Return JSON in this exact format:
@@ -948,11 +1493,11 @@ Rules:
 - intermediate_consequences: 2-4 immediate effects (before escalation)
 - consequences: 2-4 final impacts (worst credible, no safeguards assumed)
 - scenario_comments: narrative chain from cause → intermediate → final impact
-- drawing_references: extract from knowledge context if available, otherwise empty list
-- mitigation_details: extract from knowledge context if available, otherwise empty list
+- drawing_references: extract from P&ID context if available, otherwise empty list
+- mitigation_details: suggest relevant mitigations based on the P&ID equipment and instruments, otherwise empty list
 - planned_residual_risk: estimate post-recommendation risk severity (1-5) and probability (1-5)
-- Be specific to the equipment type and deviation
-- Use knowledge context to ground your answers where possible
+- Be specific to the equipment type, deviation, and the actual P&ID layout provided
+- Ground your answers in the P&ID information (equipment, instruments, line connectivity, control loops)
 """
         return prompt
 

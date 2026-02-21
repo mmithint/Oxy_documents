@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     # Embedding rate-limit tuning (Azure OpenAI TPM quota for the embedding deployment)
     EMBEDDING_TPM_LIMIT: int = 240000
 
+    # ODA File Converter — DWG → PDF conversion
+    # Download from: https://www.opendesign.com/guestfiles/oda_file_converter
+    # Example (Windows): C:\Program Files\ODA\ODAFileConverter\ODAFileConverter.exe
+    # Example (Linux):   /usr/bin/ODAFileConverter
+    ODA_CONVERTER_PATH: str = ""
+
     class Config:
         env_file = ".env"
         case_sensitive = True

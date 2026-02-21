@@ -1,10 +1,11 @@
 import { useState, useEffect } from "react";
-import type { PIDNode, HAZOPReport, Instrument } from "../types/hazop";
+import type { PIDNode, HAZOPReport, Instrument, InstrumentClassificationConfig, DeviationCauses, DeviationConsequences, DeviationSafeguards } from "../types/hazop";
 import UploadPanel from "../components/UploadPanel";
 import EquipmentReviewTable from "../components/EquipmentReviewTable";
 import DeviationSelector from "../components/DeviationSelector";
 import CausesReviewTable from "../components/CausesReviewTable";
 import ConsequenceReviewTable from "../components/ConsequenceReviewTable";
+import SafeguardsReviewTable from "../components/SafeguardsReviewTable";
 import HazopTable from "../components/HazopTable";
 import ExtractionDetails from "../components/ExtractionDetails";
 import { generateHAZOP, generateHAZOPQuick, getHAZOPByNode, checkBackendConnection } from "../services/api";
@@ -32,7 +33,7 @@ function isSafetyDevice(inst: Instrument): boolean {
   return SAFETY_TYPE_KEYWORDS.some((kw) => inst.instrument_type.toLowerCase().includes(kw));
 }
 
-type WorkflowStep = "upload" | "validate" | "select_deviations" | "review_causes" | "review_consequences" | "generate" | "review";
+type WorkflowStep = "upload" | "validate" | "select_deviations" | "review_causes" | "review_consequences" | "review_safeguards" | "generate" | "review";
 
 export default function Dashboard() {
   const [step, setStep] = useState<WorkflowStep>("upload");
@@ -47,6 +48,10 @@ export default function Dashboard() {
   const [visionRawOutput, setVisionRawOutput] = useState<Record<string, unknown> | null>(null);
   const [mergeSummary, setMergeSummary] = useState<Record<string, unknown> | null>(null);
   const [selectedDeviationTypes, setSelectedDeviationTypes] = useState<string[] | null>(null);
+  const [instrumentConfig, setInstrumentConfig] = useState<InstrumentClassificationConfig | null>(null);
+  const [cachedCauses, setCachedCauses] = useState<DeviationCauses[] | null>(null);
+  const [cachedConsequences, setCachedConsequences] = useState<DeviationConsequences[] | null>(null);
+  const [cachedSafeguards, setCachedSafeguards] = useState<DeviationSafeguards[] | null>(null);
 
   useEffect(() => {
     checkBackendConnection().then(({ ok, message }) => {
@@ -76,23 +81,47 @@ export default function Dashboard() {
   };
 
   // Step 2: Equipment validated → select deviations
-  const handleEquipmentValidated = () => {
+  const handleEquipmentValidated = (updatedNode: PIDNode) => {
+    setSelectedNode(updatedNode);
+    // Invalidate all downstream caches since equipment/instruments changed
+    setCachedCauses(null);
+    setCachedConsequences(null);
+    setCachedSafeguards(null);
     setStep("select_deviations");
   };
 
   // Step 3: Deviations selected → review causes
-  const handleDeviationsSelected = (types: string[]) => {
+  const handleDeviationsSelected = (types: string[], config: InstrumentClassificationConfig) => {
+    // Invalidate caches if deviation types or instrument config changed
+    const typesChanged = JSON.stringify(types) !== JSON.stringify(selectedDeviationTypes);
+    const configChanged = JSON.stringify(config) !== JSON.stringify(instrumentConfig);
+    if (typesChanged || configChanged) {
+      setCachedCauses(null);
+      setCachedConsequences(null);
+      setCachedSafeguards(null);
+    }
     setSelectedDeviationTypes(types);
+    setInstrumentConfig(config);
     setStep("review_causes");
   };
 
   // Step 4: Causes approved → review consequences
   const handleCausesApproved = () => {
+    // Causes may have been edited → downstream caches are stale
+    setCachedConsequences(null);
+    setCachedSafeguards(null);
     setStep("review_consequences");
   };
 
-  // Step 5: Consequences approved → ready to generate
+  // Step 5: Consequences approved → review safeguards
   const handleConsequencesApproved = () => {
+    // Consequences may have been edited → safeguards cache is stale
+    setCachedSafeguards(null);
+    setStep("review_safeguards");
+  };
+
+  // Step 6: Safeguards approved → ready to generate
+  const handleSafeguardsApproved = () => {
     setStep("generate");
   };
 
@@ -289,6 +318,8 @@ export default function Dashboard() {
               <DeviationSelector
                 onSubmit={handleDeviationsSelected}
                 onBack={handleBackToValidation}
+                node={selectedNode}
+                initialConfig={instrumentConfig ?? undefined}
               />
             )}
 
@@ -298,14 +329,32 @@ export default function Dashboard() {
                 selectedDeviationTypes={selectedDeviationTypes}
                 onApproved={handleCausesApproved}
                 onBack={() => setStep("select_deviations")}
+                instrumentConfig={instrumentConfig ?? undefined}
+                initialCauses={cachedCauses}
+                onCausesChange={setCachedCauses}
               />
             )}
 
-            {step === "review_consequences" && selectedNode && (
+            {step === "review_consequences" && selectedNode && selectedDeviationTypes && (
               <ConsequenceReviewTable
                 nodeId={selectedNode.node_id}
+                selectedDeviationTypes={selectedDeviationTypes}
                 onApproved={handleConsequencesApproved}
                 onBack={() => setStep("review_causes")}
+                initialConsequences={cachedConsequences}
+                onConsequencesChange={setCachedConsequences}
+              />
+            )}
+
+            {step === "review_safeguards" && selectedNode && selectedDeviationTypes && (
+              <SafeguardsReviewTable
+                nodeId={selectedNode.node_id}
+                selectedDeviationTypes={selectedDeviationTypes}
+                onApproved={handleSafeguardsApproved}
+                onBack={() => setStep("review_consequences")}
+                instrumentConfig={instrumentConfig ?? undefined}
+                initialSafeguards={cachedSafeguards}
+                onSafeguardsChange={setCachedSafeguards}
               />
             )}
 
@@ -497,11 +546,12 @@ function WorkflowSteps({ currentStep }: { currentStep: WorkflowStep }) {
     { key: "select_deviations", label: "3. Select Deviations" },
     { key: "review_causes", label: "4. Review Causes" },
     { key: "review_consequences", label: "5. Review Consequences" },
-    { key: "generate", label: "6. Generate HAZOP" },
-    { key: "review", label: "7. SME Review" },
+    { key: "review_safeguards", label: "6. Review Safeguards" },
+    { key: "generate", label: "7. Generate HAZOP" },
+    { key: "review", label: "8. SME Review" },
   ];
 
-  const stepOrder: WorkflowStep[] = ["upload", "validate", "select_deviations", "review_causes", "review_consequences", "generate", "review"];
+  const stepOrder: WorkflowStep[] = ["upload", "validate", "select_deviations", "review_causes", "review_consequences", "review_safeguards", "generate", "review"];
   const currentIndex = stepOrder.indexOf(currentStep);
 
   return (

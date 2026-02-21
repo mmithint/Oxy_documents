@@ -4,8 +4,11 @@ import { generateConsequences, approveConsequences } from "../services/api";
 
 interface ConsequenceReviewTableProps {
   nodeId: string;
+  selectedDeviationTypes: string[];
   onApproved: () => void;
   onBack: () => void;
+  initialConsequences: DeviationConsequences[] | null;
+  onConsequencesChange: (consequences: DeviationConsequences[]) => void;
 }
 
 type ProgressStep = {
@@ -21,8 +24,11 @@ type TableScenarioEdit = { devIdx: number; scenarioVal: string; consequencesVal:
 
 export default function ConsequenceReviewTable({
   nodeId,
+  selectedDeviationTypes,
   onApproved,
   onBack,
+  initialConsequences,
+  onConsequencesChange,
 }: ConsequenceReviewTableProps) {
   const [deviationConsequences, setDeviationConsequences] = useState<DeviationConsequences[]>([]);
   const [loading, setLoading] = useState(false);
@@ -47,15 +53,29 @@ export default function ConsequenceReviewTable({
   const [tableIntermEdit, setTableIntermEdit] = useState<TableIntermEdit>(null);
   const [tableScenarioEdit, setTableScenarioEdit] = useState<TableScenarioEdit>(null);
   const [tableEditingCategory, setTableEditingCategory] = useState<number | null>(null);
+  const [tableEditingPec, setTableEditingPec] = useState<number | null>(null);
+  const [tableEditingCurrentRisk, setTableEditingCurrentRisk] = useState<number | null>(null);
 
   const hasTriggered = useRef(false);
   useEffect(() => {
-    if (!hasTriggered.current && nodeId) {
-      hasTriggered.current = true;
+    if (hasTriggered.current) return;
+    hasTriggered.current = true;
+    if (initialConsequences && initialConsequences.length > 0) {
+      setDeviationConsequences(initialConsequences);
+      setGenerated(true);
+    } else if (nodeId) {
       handleGenerate();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Sync local edits back to parent cache
+  useEffect(() => {
+    if (generated && deviationConsequences.length > 0) {
+      onConsequencesChange(deviationConsequences);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviationConsequences, generated]);
 
   const handleGenerate = async () => {
     setLoading(true);
@@ -83,7 +103,7 @@ export default function ConsequenceReviewTable({
         }, 2000),
       ];
 
-      const result = await generateConsequences(nodeId);
+      const result = await generateConsequences(nodeId, selectedDeviationTypes);
       stepTimers.forEach(clearTimeout);
 
       setProgressSteps([
@@ -193,6 +213,24 @@ export default function ConsequenceReviewTable({
     });
     setEditingCategory(null);
     setTableEditingCategory(null);
+  };
+
+  const handlePecChange = (devIdx: number, value: string) => {
+    setDeviationConsequences((prev) => {
+      const updated = [...prev];
+      updated[devIdx] = { ...updated[devIdx], pec: value };
+      return updated;
+    });
+    setTableEditingPec(null);
+  };
+
+  const handleCurrentRiskChange = (devIdx: number, value: string) => {
+    setDeviationConsequences((prev) => {
+      const updated = [...prev];
+      updated[devIdx] = { ...updated[devIdx], current_risk: value };
+      return updated;
+    });
+    setTableEditingCurrentRisk(null);
   };
 
   // ---- Table-view edit helpers ----
@@ -422,6 +460,14 @@ export default function ConsequenceReviewTable({
                     <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap border-r border-gray-200 w-28">
                       Category
                     </th>
+                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap border-r border-gray-200 w-24">
+                      PEC
+                      <span className="ml-1 text-gray-400 normal-case font-normal text-[10px]">(click)</span>
+                    </th>
+                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap border-r border-gray-200 w-24">
+                      Current Risk
+                      <span className="ml-1 text-gray-400 normal-case font-normal text-[10px]">(click)</span>
+                    </th>
                     <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide w-72">
                       Scenario Comments / Final Impacts
                       <span className="ml-1 text-gray-400 normal-case font-normal text-[10px]">(click to edit)</span>
@@ -438,6 +484,8 @@ export default function ConsequenceReviewTable({
                     const isEditingInterm = tableIntermEdit?.devIdx === idx;
                     const isEditingScenario = tableScenarioEdit?.devIdx === idx;
                     const isEditingCat = tableEditingCategory === idx;
+                    const isEditingPec = tableEditingPec === idx;
+                    const isEditingCurrentRisk = tableEditingCurrentRisk === idx;
 
                     return (
                       <tr key={dev.deviation_id} className="hover:bg-gray-50 align-top">
@@ -570,6 +618,83 @@ export default function ConsequenceReviewTable({
                                 PEC: {dev.pec}
                               </span>
                             </div>
+                          )}
+                        </td>
+
+                        {/* PEC — click to edit */}
+                        <td className="px-3 py-2.5 border-r border-gray-100">
+                          {isEditingPec ? (
+                            <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
+                              {["PEC-1", "PEC-2", "PEC-3", "PEC-4"].map((p) => (
+                                <button
+                                  key={p}
+                                  onClick={() => handlePecChange(idx, p)}
+                                  className="block w-full text-left text-[11px] px-2 py-0.5 rounded border border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 font-medium"
+                                >
+                                  {p}
+                                </button>
+                              ))}
+                              <button
+                                onClick={() => setTableEditingPec(null)}
+                                className="text-[10px] text-gray-400 hover:text-gray-600 mt-0.5"
+                              >Cancel</button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => setTableEditingPec(idx)}
+                              title="Click to change PEC"
+                              className={`text-[11px] px-2 py-0.5 rounded border font-medium hover:opacity-80 ${
+                                dev.pec
+                                  ? "bg-purple-100 text-purple-700 border-purple-300"
+                                  : "bg-gray-50 text-gray-400 border-dashed border-gray-300"
+                              }`}
+                            >
+                              {dev.pec ?? "Set…"}
+                            </button>
+                          )}
+                        </td>
+
+                        {/* Current Risk — click to edit */}
+                        <td className="px-3 py-2.5 border-r border-gray-100">
+                          {isEditingCurrentRisk ? (
+                            <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
+                              {["C5", "D4", "D5", "E5", "B4", "C4"].map((r) => (
+                                <button
+                                  key={r}
+                                  onClick={() => handleCurrentRiskChange(idx, r)}
+                                  className={`block w-full text-left text-[11px] px-2 py-0.5 rounded border font-medium hover:opacity-80 ${
+                                    r.startsWith("E") ? "bg-red-100 text-red-700 border-red-300" :
+                                    r.startsWith("D") ? "bg-red-50 text-red-600 border-red-200" :
+                                    r.startsWith("C") ? "bg-amber-50 text-amber-700 border-amber-200" :
+                                    "bg-yellow-50 text-yellow-700 border-yellow-200"
+                                  }`}
+                                >
+                                  {r}
+                                </button>
+                              ))}
+                              <button
+                                onClick={() => setTableEditingCurrentRisk(null)}
+                                className="text-[10px] text-gray-400 hover:text-gray-600 mt-0.5"
+                              >Cancel</button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => setTableEditingCurrentRisk(idx)}
+                              title="Click to change current risk"
+                              className={`text-[11px] px-2 py-1 rounded border font-bold hover:opacity-80 ${
+                                !dev.current_risk
+                                  ? "bg-gray-50 text-gray-400 border-dashed border-gray-300"
+                                  : dev.current_risk.startsWith("E")
+                                  ? "bg-red-200 text-red-900 border-red-400"
+                                  : dev.current_risk.startsWith("D")
+                                  ? "bg-red-100 text-red-700 border-red-300"
+                                  : dev.current_risk.startsWith("C")
+                                  ? "bg-amber-100 text-amber-700 border-amber-300"
+                                  : "bg-yellow-50 text-yellow-700 border-yellow-200"
+                              }`}
+                            >
+                              {dev.current_risk ?? "Set…"}
+                            </button>
                           )}
                         </td>
 
@@ -714,7 +839,7 @@ function ApprovalSection({
           disabled={!smeName.trim() || submitting}
           className="px-5 py-2 text-sm font-medium text-white bg-blue-600 rounded hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
         >
-          {submitting ? "Approving…" : "Approve Consequences & Generate HAZOP"}
+          {submitting ? "Approving…" : "Approve Consequences & Review Safeguards"}
         </button>
         <button
           onClick={onBack}
@@ -933,7 +1058,17 @@ function DeviationConsequenceCard({
         )}
         {dev.pec && (
           <span className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300 font-medium">
-            PEC: {dev.pec}
+            {dev.pec}
+          </span>
+        )}
+        {dev.current_risk && (
+          <span className={`text-xs px-2 py-0.5 rounded border font-bold ${
+            dev.current_risk.startsWith("E") ? "bg-red-200 text-red-900 border-red-400" :
+            dev.current_risk.startsWith("D") ? "bg-red-100 text-red-700 border-red-300" :
+            dev.current_risk.startsWith("C") ? "bg-amber-100 text-amber-700 border-amber-300" :
+            "bg-yellow-50 text-yellow-700 border-yellow-200"
+          }`}>
+            {dev.current_risk}
           </span>
         )}
         {dev.drawing_references.length > 0 && (

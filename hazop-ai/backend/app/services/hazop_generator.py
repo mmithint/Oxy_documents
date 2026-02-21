@@ -70,6 +70,7 @@ class HAZOPGeneratorService:
         selected_deviation_types: list[str] | None = None,
         approved_causes: dict | None = None,
         approved_consequences: dict | None = None,
+        approved_safeguards: dict | None = None,
     ) -> HAZOPReport:
         """
         Generate a complete HAZOP report for a validated node.
@@ -82,6 +83,8 @@ class HAZOPGeneratorService:
                             from SME review. LLM will not overwrite these causes.
             approved_consequences: If provided, dict of deviation_id -> consequence fields
                             from SME review. LLM will not overwrite these consequence fields.
+            approved_safeguards: If provided, dict of deviation_id -> {safeguards: [...], ...}
+                            from SME review. These replace placeholder safeguards.
 
         Returns:
             Complete HAZOPReport with all deviations, risk scores, and recommendations
@@ -101,6 +104,10 @@ class HAZOPGeneratorService:
         if approved_consequences:
             deviations = self._apply_approved_consequences(deviations, approved_consequences)
 
+        # If we have approved safeguards, apply them to matching deviations
+        if approved_safeguards:
+            deviations = self._apply_approved_safeguards(deviations, approved_safeguards)
+
         # ---- STEP 2-6: Enrich each deviation ----
         enriched_deviations: list[Deviation] = []
 
@@ -115,12 +122,18 @@ class HAZOPGeneratorService:
                 approved_consequences is not None
                 and deviation.deviation_id in approved_consequences
             )
+            # Skip safeguard enrichment if this deviation has SME-approved safeguards
+            skip_safeguards = (
+                approved_safeguards is not None
+                and deviation.deviation_id in approved_safeguards
+            )
             enriched = await self._enrich_deviation(
                 deviation=deviation,
                 node=node,
                 include_recommendations=include_recommendations,
                 skip_causes=skip_causes,
                 skip_consequences=skip_consequences,
+                skip_safeguards=skip_safeguards,
             )
             enriched_deviations.append(enriched)
 
@@ -153,6 +166,7 @@ class HAZOPGeneratorService:
         include_recommendations: bool,
         skip_causes: bool = False,
         skip_consequences: bool = False,
+        skip_safeguards: bool = False,
     ) -> Deviation:
         """
         Enrich a single deviation with LLM-generated content and risk scores.
@@ -188,6 +202,7 @@ class HAZOPGeneratorService:
                 knowledge_context=knowledge_context,
                 skip_causes=skip_causes,
                 skip_consequences=skip_consequences,
+                skip_safeguards=skip_safeguards,
                 node=node,
             )
 
@@ -248,11 +263,13 @@ class HAZOPGeneratorService:
         knowledge_context: str,
         skip_causes: bool = False,
         skip_consequences: bool = False,
+        skip_safeguards: bool = False,
         node: PIDNode | None = None,
     ) -> None:
         """Enrich ALL HAZOP fields using single expanded LLM call + RAG context.
         If skip_causes is True, causes are not overwritten (SME pre-approved).
-        If skip_consequences is True, consequence fields are not overwritten (SME pre-approved)."""
+        If skip_consequences is True, consequence fields are not overwritten (SME pre-approved).
+        If skip_safeguards is True, safeguard enrichment is skipped (SME pre-approved)."""
         try:
             safeguard_descriptions = [
                 sg.description for sg in deviation.safeguards
@@ -323,8 +340,10 @@ class HAZOPGeneratorService:
                 deviation.pec = result.get("personnel_exposure")
 
             # Enrich safeguards with control_category and cme_name from LLM
-            mitigation_details = result.get("mitigation_details", [])
-            self._enrich_safeguards(deviation.safeguards, mitigation_details)
+            # Skip if SME has pre-approved safeguards (they already have full classification)
+            if not skip_safeguards:
+                mitigation_details = result.get("mitigation_details", [])
+                self._enrich_safeguards(deviation.safeguards, mitigation_details)
 
             # Recommendations (from expanded call, merged with later generation)
             llm_recs = result.get("recommendations", [])
@@ -639,6 +658,55 @@ class HAZOPGeneratorService:
                         break
                 if original_id:
                     approved_consequences[dev.deviation_id] = approved_consequences[original_id]
+
+        return deviations
+
+    def _apply_approved_safeguards(
+        self,
+        deviations: list[Deviation],
+        approved_safeguards: dict,
+    ) -> list[Deviation]:
+        """
+        Apply SME-approved safeguards to deviations before HAZOP generation.
+
+        Matches by (equipment_tag, deviation_name) since deviation_ids are regenerated.
+        Builds Safeguard objects from the stored SafeguardReviewItem dicts.
+        """
+        from app.models.hazop_models import Safeguard, PRClassification
+
+        approved_lookup: dict[tuple[str, str], dict] = {}
+        for _dev_id, data in approved_safeguards.items():
+            key = (data.get("equipment_tag", ""), data.get("deviation", ""))
+            approved_lookup[key] = data
+
+        for dev in deviations:
+            key = (dev.equipment_tag, dev.deviation)
+            if key in approved_lookup:
+                approved = approved_lookup[key]
+                raw_safeguards = approved.get("safeguards", [])
+                dev.safeguards = [
+                    Safeguard(
+                        instrument_tag=sg.get("instrument_tag", ""),
+                        description=sg.get("description", ""),
+                        pr_classification=PRClassification(sg.get("pr_classification", "Other"))
+                            if sg.get("pr_classification") in [e.value for e in PRClassification]
+                            else PRClassification.OTHER,
+                        mitigation_type=sg.get("mitigation_type"),
+                        pid_reference=sg.get("pid_reference"),
+                        control_category=sg.get("control_category"),
+                        cme_name=sg.get("cme_name"),
+                        cme_id=sg.get("cme_id"),
+                    )
+                    for sg in raw_safeguards
+                ]
+                # Register new deviation_id for skip_safeguards lookup
+                original_id = None
+                for aid, adata in approved_safeguards.items():
+                    if (adata.get("equipment_tag"), adata.get("deviation")) == key:
+                        original_id = aid
+                        break
+                if original_id:
+                    approved_safeguards[dev.deviation_id] = approved_safeguards[original_id]
 
         return deviations
 

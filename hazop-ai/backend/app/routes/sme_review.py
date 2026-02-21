@@ -27,6 +27,7 @@ from app.models.api_models import (
     DeviationEditRequest, DeviationEditResponse,
     ApproveCausesRequest, ApproveCausesResponse,
     ApproveConsequencesRequest, ApproveConsequencesResponse,
+    ApproveSafeguardsRequest, ApproveSafeguardsResponse,
 )
 from app.database.cosmos_client import cosmos_client
 
@@ -73,7 +74,6 @@ async def validate_equipment(request: EquipmentValidationRequest):
     node_data["validation_comments"] = request.comments
     if request.upstream_pressure_psig is not None:
         node_data["upstream_pressure_psig"] = request.upstream_pressure_psig
-
     # Save updated node
     await cosmos_client.save_node(node_data)
 
@@ -112,6 +112,8 @@ async def approve_causes(request: ApproveCausesRequest):
             "guideword": item.guideword,
             "parameter": item.parameter,
             "causes": item.causes,
+            "included_instruments": [i.model_dump() for i in item.included_instruments],
+            "excluded_instruments": [i.model_dump() for i in item.excluded_instruments],
             "approved_by": request.sme_name,
             "approved_at": datetime.utcnow().isoformat(),
         }
@@ -163,6 +165,7 @@ async def approve_consequences(request: ApproveConsequencesRequest):
             "scenario_comments": item.scenario_comments,
             "consequence_category": item.consequence_category,
             "pec": item.pec,
+            "current_risk": item.current_risk,
             "approved_by": request.sme_name,
             "approved_at": datetime.utcnow().isoformat(),
         }
@@ -178,6 +181,55 @@ async def approve_consequences(request: ApproveConsequencesRequest):
         message=f"Consequences approved by {request.sme_name} for {len(request.deviation_consequences)} deviations",
         node_id=request.node_id,
         deviations_count=len(request.deviation_consequences),
+        approved=True,
+    )
+
+
+# --- Safeguards Review (Pre-Generation Step) ---
+
+@router.post("/approve-safeguards", response_model=ApproveSafeguardsResponse)
+async def approve_safeguards(request: ApproveSafeguardsRequest):
+    """
+    SME approves/edits safeguards for all deviations before full HAZOP generation.
+
+    The approved safeguards are stored on the node document and will be injected
+    into deviations during HAZOP generation (bypassing placeholder safeguards).
+    """
+    node_data = await cosmos_client.get_node(request.node_id)
+    if not node_data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Node {request.node_id} not found",
+        )
+
+    # Build approved_safeguards dict keyed by deviation_id
+    approved_safeguards = {}
+    for item in request.deviation_safeguards:
+        approved_safeguards[item.deviation_id] = {
+            "equipment_tag": item.equipment_tag,
+            "deviation": item.deviation,
+            "guideword": item.guideword,
+            "parameter": item.parameter,
+            "causes": item.causes,
+            "drawing_references": item.drawing_references,
+            "intermediate_consequences": item.intermediate_consequences,
+            "consequences": item.consequences,
+            "safeguards": [sg.model_dump(mode="json") for sg in item.safeguards],
+            "approved_by": request.sme_name,
+            "approved_at": datetime.utcnow().isoformat(),
+        }
+
+    node_data["approved_safeguards"] = approved_safeguards
+    node_data["safeguards_approved_by"] = request.sme_name
+    node_data["safeguards_approved_at"] = datetime.utcnow().isoformat()
+    node_data["safeguards_approval_comments"] = request.comments
+
+    await cosmos_client.save_node(node_data)
+
+    return ApproveSafeguardsResponse(
+        message=f"Safeguards approved by {request.sme_name} for {len(request.deviation_safeguards)} deviations",
+        node_id=request.node_id,
+        deviations_count=len(request.deviation_safeguards),
         approved=True,
     )
 

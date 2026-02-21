@@ -30,8 +30,14 @@ from app.core.config import get_settings
 from app.models.pid_models import (
     PIDNode, Equipment, Instrument,
     PIDExtractionResult,
+    LineConnection, ControlLoop, DeviationLocation,
 )
 from app.services.openai_service import openai_service
+from app.services.dxf_extractor import (
+    extract_entities_from_dxf,
+    format_entities_for_llm,
+    get_layer_summary,
+)
 
 settings = get_settings()
 
@@ -182,6 +188,11 @@ class DocumentIntelligenceService:
             system = llm_result.get("system") or "Hydrocarbon Processing Systems"
             description = llm_result.get("description") or f"Extracted from {source_filename}"
             drawing_number = llm_result.get("drawing_number")  # e.g. "APC No. 4020(c)"
+            pid_summary = llm_result.get("pid_summary") or None
+            flow_description = llm_result.get("flow_description") or None
+            line_connectivity = _parse_line_connectivity(llm_result)
+            control_loops = _parse_control_loops(llm_result)
+            deviation_locations = _parse_deviation_locations(llm_result)
         else:
             # Regex fallback for text path
             text_equipment = self._detect_equipment(raw_text)
@@ -190,6 +201,11 @@ class DocumentIntelligenceService:
             system = "Hydrocarbon Processing Systems"
             description = f"Regex-extracted from {source_filename}"
             drawing_number = None
+            pid_summary = None
+            flow_description = None
+            line_connectivity = []
+            control_loops = []
+            deviation_locations = []
 
         # ---- PATH 2: Vision extraction (NEW) ----
         vision_equipment: list[Equipment] = []
@@ -211,6 +227,17 @@ class DocumentIntelligenceService:
                 )
                 vision_equipment = self._parse_llm_equipment(vision_result)
                 vision_instruments = self._parse_llm_instruments(vision_result)
+                # Vision has a direct view of the diagram — prefer its results if available
+                if vision_result.get("pid_summary"):
+                    pid_summary = vision_result["pid_summary"]
+                if vision_result.get("flow_description"):
+                    flow_description = vision_result["flow_description"]
+                if vision_result.get("line_connectivity"):
+                    line_connectivity = _parse_line_connectivity(vision_result)
+                if vision_result.get("control_loops"):
+                    control_loops = _parse_control_loops(vision_result)
+                if vision_result.get("deviation_locations"):
+                    deviation_locations = _parse_deviation_locations(vision_result)
                 print(
                     f"[P&ID Vision] Found {len(vision_equipment)} equipment, "
                     f"{len(vision_instruments)} instruments via vision"
@@ -244,6 +271,11 @@ class DocumentIntelligenceService:
             pid_drawings=[source_filename],
             description=description,
             drawing_number=drawing_number,
+            pid_summary=pid_summary,
+            flow_description=flow_description,
+            line_connectivity=line_connectivity,
+            control_loops=control_loops,
+            deviation_locations=deviation_locations,
         )
 
         confidence = self._calculate_confidence(equipment_list, instrument_list, raw_text)
@@ -296,6 +328,135 @@ class DocumentIntelligenceService:
             llm_raw_output=llm_result,
             vision_raw_output=vision_result,
             merge_summary=merge_summary,
+        )
+
+    # ------------------------------------------------------------------
+    # DXF Extraction Path (DWG uploads — no OCR, no Vision)
+    # ------------------------------------------------------------------
+
+    async def parse_pid_from_dxf(
+        self,
+        dxf_content: bytes,
+        source_filename: str,
+        node_id: str | None = None,
+    ) -> PIDExtractionResult:
+        """
+        Parse a DXF file and extract equipment and instruments directly from
+        CAD text entities — no Azure Document Intelligence OCR, no Vision.
+
+        This is used when the user uploads a DWG file.  The DWG is first
+        converted to DXF by ODA File Converter (in the upload route), then
+        this method reads the text entities using ezdxf.
+
+        Why this is better than PDF-OCR for DWG:
+          - Tags are exact strings — no misreads (no "V-l210" for "V-1210")
+          - Spatial coordinates help associate instruments with equipment
+          - Layer names classify entity types before sending to the LLM
+
+        Pipeline:
+          1. ezdxf extracts TEXT/MTEXT entities → [{text, x, y, layer}]
+          2. Entities are formatted and sent to the LLM
+          3. LLM returns equipment[] and instruments[] (same JSON schema as OCR path)
+          4. Build PIDNode and PIDExtractionResult (same structure as parse_pid())
+        """
+        # ---- Step 1: Extract text entities from DXF ----
+        try:
+            entities = extract_entities_from_dxf(dxf_content)
+        except Exception as exc:
+            print(f"[DXF Extract] Entity extraction failed: {exc}")
+            entities = []
+
+        layer_summary = get_layer_summary(entities)
+        print(f"[DXF Extract] Layer summary: {layer_summary}")
+
+        # Format for LLM
+        entity_text = format_entities_for_llm(entities)
+
+        # ---- Step 2: LLM extraction from DXF entities ----
+        llm_result: dict | None = None
+        try:
+            llm_result = await openai_service.extract_pid_from_dxf_entities(
+                entity_text=entity_text,
+                source_filename=source_filename,
+            )
+        except Exception as exc:
+            print(f"[DXF LLM] Failed: {exc}")
+
+        # ---- Step 3: Parse LLM output ----
+        if llm_result:
+            equipment_list = self._parse_llm_equipment(llm_result)
+            instrument_list = self._parse_llm_instruments(llm_result)
+            node_name = (
+                llm_result.get("node_name")
+                or f"Node from {source_filename}"
+            )
+            system = llm_result.get("system") or "Hydrocarbon Processing Systems"
+            description = (
+                llm_result.get("description")
+                or f"Extracted from DWG: {source_filename}"
+            )
+            drawing_number = llm_result.get("drawing_number")
+            pid_summary = llm_result.get("pid_summary") or None
+            flow_description = llm_result.get("flow_description") or None
+            line_connectivity = _parse_line_connectivity(llm_result)
+            control_loops = _parse_control_loops(llm_result)
+            deviation_locations = _parse_deviation_locations(llm_result)
+        else:
+            # Regex fallback on the raw entity text
+            print("[DXF Extract] LLM failed — falling back to regex on entity text")
+            equipment_list = self._detect_equipment(entity_text)
+            instrument_list = self._detect_instruments(entity_text)
+            node_name = f"Node from {source_filename}"
+            system = "Hydrocarbon Processing Systems"
+            description = f"Regex-extracted from DWG: {source_filename}"
+            drawing_number = None
+            pid_summary = None
+            flow_description = None
+            line_connectivity = []
+            control_loops = []
+            deviation_locations = []
+
+        # ---- Step 4: Build node ----
+        auto_node_id = node_id or self._generate_node_id(source_filename)
+
+        node = PIDNode(
+            node_id=auto_node_id,
+            node_name=node_name,
+            system=system,
+            equipment=equipment_list,
+            instruments=instrument_list,
+            pid_drawings=[source_filename],
+            description=description,
+            drawing_number=_normalize_drawing_number(drawing_number),
+            pid_summary=pid_summary,
+            flow_description=flow_description,
+            line_connectivity=line_connectivity,
+            control_loops=control_loops,
+            deviation_locations=deviation_locations,
+        )
+
+        confidence = self._calculate_confidence(equipment_list, instrument_list, entity_text)
+
+        # Build a DXF-specific extraction summary
+        dxf_summary = {
+            "extraction_method": "dxf_entity_extraction",
+            "entity_count": len(entities),
+            "layer_summary": layer_summary,
+            "equipment_count": len(equipment_list),
+            "instrument_count": len(instrument_list),
+            "equipment_tags": sorted({eq.tag for eq in equipment_list}),
+            "instrument_tags": sorted({inst.tag for inst in instrument_list}),
+        }
+
+        return PIDExtractionResult(
+            source_file=source_filename,
+            nodes=[node],
+            raw_text=entity_text[:5000],
+            confidence_score=confidence,
+            ocr_chunks=[entity_text],   # single "chunk" — already structured
+            llm_raw_output=llm_result,
+            vision_raw_output=None,     # no Vision pass for DXF path
+            merge_summary=dxf_summary,
         )
 
     # ------------------------------------------------------------------
@@ -376,10 +537,15 @@ class DocumentIntelligenceService:
                 continue
             seen_tags.add(tag)
 
+            raw_type = (item.get("equipment_type") or "Other").strip()
+            # Normalize pipeline / pipe variants → "Piping" (SME-preferred term)
+            if raw_type.lower() in ("pipeline", "pipe line", "pipe", "piping", "pipework"):
+                raw_type = "Piping"
+
             equipment_list.append(Equipment(
                 tag=tag,
                 name=item.get("name") or tag,
-                equipment_type=item.get("equipment_type") or "Other",
+                equipment_type=raw_type,
                 design_pressure=_safe_float(item.get("design_pressure")),
                 design_temperature=_safe_float(item.get("design_temperature")),
                 operating_pressure=_safe_float(item.get("operating_pressure")),
@@ -723,6 +889,80 @@ def _safe_float(value) -> float | None:
         return float(value)
     except (ValueError, TypeError):
         return None
+
+
+def _parse_line_connectivity(llm_result: dict) -> list[LineConnection]:
+    """Parse line_connectivity from LLM JSON output into LineConnection objects."""
+    items: list[LineConnection] = []
+    for lc in llm_result.get("line_connectivity", []):
+        if not isinstance(lc, dict):
+            continue
+        from_tag = (lc.get("from_tag") or "").strip()
+        to_tag = (lc.get("to_tag") or "").strip()
+        if not from_tag or not to_tag:
+            continue
+        items.append(LineConnection(
+            from_tag=from_tag,
+            to_tag=to_tag,
+            line_id=lc.get("line_id"),
+            fluid_phase=lc.get("fluid_phase"),
+            pipe_size=lc.get("pipe_size"),
+            description=lc.get("description"),
+        ))
+    return items
+
+
+def _parse_control_loops(llm_result: dict) -> list[ControlLoop]:
+    """Parse control_loops from LLM JSON output into ControlLoop objects."""
+    items: list[ControlLoop] = []
+    for cl in llm_result.get("control_loops", []):
+        if not isinstance(cl, dict):
+            continue
+        final_element = (cl.get("final_element") or "").strip()
+        controlled_equipment = (cl.get("controlled_equipment") or "").strip()
+        controlled_variable = (cl.get("controlled_variable") or "").strip()
+        if not final_element or not controlled_equipment or not controlled_variable:
+            continue
+        items.append(ControlLoop(
+            loop_id=cl.get("loop_id"),
+            controlled_variable=controlled_variable,
+            measuring_element=cl.get("measuring_element"),
+            controller=cl.get("controller"),
+            final_element=final_element,
+            controlled_equipment=controlled_equipment,
+            description=cl.get("description"),
+        ))
+    return items
+
+
+def _parse_deviation_locations(llm_result: dict) -> list[DeviationLocation]:
+    """Parse deviation_locations from LLM JSON output into DeviationLocation objects."""
+    items: list[DeviationLocation] = []
+    for dl in llm_result.get("deviation_locations", []):
+        if not isinstance(dl, dict):
+            continue
+        equipment_tag = (dl.get("equipment_tag") or "").strip()
+        if not equipment_tag:
+            continue
+        items.append(DeviationLocation(
+            equipment_tag=equipment_tag,
+            susceptible_deviations=dl.get("susceptible_deviations", []),
+            drawing_reference=dl.get("drawing_reference"),
+            location_description=dl.get("location_description"),
+        ))
+    return items
+
+
+def _normalize_drawing_number(raw: str | None) -> str | None:
+    """
+    Strip trailing revision suffix from an APC / drawing number.
+    e.g. "APC No. 4020(c)" → "APC No. 4020"
+         "DWG-4020-A"      → "DWG-4020-A"  (unchanged)
+    """
+    if not raw:
+        return None
+    cleaned = re.sub(r'\s*\([^)]+\)\s*$', '', raw.strip())
+    return cleaned or None
 
 
 # Module-level singleton

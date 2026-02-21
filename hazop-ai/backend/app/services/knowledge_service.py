@@ -186,6 +186,43 @@ class KnowledgeService:
         )
         return await self.retrieve_relevant_context(query=query, limit=limit)
 
+    async def retrieve_pec_table_context(self, limit: int = 3) -> str:
+        """
+        Targeted retrieval for the Production-Deck PAF Consequence (PEC) table.
+
+        The table maps pressure (rows / x-axis) × hole size in inches (columns / y-axis)
+        to PEC numbers (PEC-1, PEC-2, …).  The LLM looks up the cell at the intersection
+        of the system pressure and the hole size determined from the pressure significance
+        table to return the PEC value and the corresponding current risk level.
+        """
+        query = (
+            "production deck PAF consequence table PEC personnel exposure count "
+            "pressure PSIG hole size inches leak size PEC-1 PEC-2 PEC-3 "
+            "current risk C5 D4 consequence category"
+        )
+        return await self.retrieve_relevant_context(query=query, limit=limit)
+
+    async def retrieve_cme_safeguard_context(self, limit: int = 5) -> str:
+        """
+        Retrieve CME ID register and PR classification table from HSE Risk Assessment doc.
+
+        Used by the safeguard generation step to let the LLM determine:
+          - PR classification (PR-1, PR-4, PC-4, etc.) for each instrument
+          - CME/KME designation
+          - CME Name (full descriptive name from the document)
+          - CME ID (unique identifier from the CME register table)
+
+        Nothing is hardcoded — the LLM reads the knowledge doc to classify.
+        """
+        query = (
+            "CME ID critical mitigation element register table classification "
+            "HSE risk assessment PR-1 PR-2 PR-4 PR-5 PC-4 safeguard category "
+            "prevention detection mitigation control category CME KME "
+            "safety instrumented system ESD shutdown valve pressure safety valve "
+            "gas detection fire detection deluge"
+        )
+        return await self.retrieve_relevant_context(query=query, limit=limit)
+
     async def retrieve_overpressure_table_context(self, limit: int = 3) -> str:
         """
         Targeted retrieval for the pressure significance / hole size table.

@@ -188,11 +188,20 @@ export default function UploadPanel({ onNodesExtracted, onExtractionDetails }: U
           <input
             ref={pidInputRef}
             type="file"
-            accept=".pdf,.png,.jpg,.jpeg,.tiff,.bmp"
+            accept=".pdf,.png,.jpg,.jpeg,.tiff,.bmp,.dwg"
             multiple
             onChange={(e) => setPidFiles(Array.from(e.target.files || []))}
             className="block w-full text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
           />
+          <p className="text-xs text-gray-400">
+            Accepts PDF, PNG, JPEG, TIFF, BMP, or DWG
+          </p>
+          {pidFiles.length > 0 && pidFiles.some((f) => f.name.toLowerCase().endsWith(".dwg")) && (
+            <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+              DWG file detected — CAD text entities will be extracted directly via ODA + ezdxf (no OCR needed).
+              Conversion may take 30–60 seconds per file.
+            </p>
+          )}
           {pidFiles.length > 1 && (
             <p className="text-xs text-blue-600">{pidFiles.length} files selected</p>
           )}
@@ -315,7 +324,11 @@ export default function UploadPanel({ onNodesExtracted, onExtractionDetails }: U
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-gray-800 truncate">{file.name}</p>
                       {file.status === "processing" && (
-                        <p className="text-blue-600 mt-0.5">Processing... please wait</p>
+                        <p className="text-blue-600 mt-0.5">
+                          {file.name.toLowerCase().endsWith(".dwg")
+                            ? "Converting DWG → DXF, extracting CAD entities..."
+                            : "Processing... please wait"}
+                        </p>
                       )}
                       {file.status === "done" && file.message && (
                         <p className="text-green-600 mt-0.5">{file.message}</p>

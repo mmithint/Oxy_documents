@@ -92,6 +92,7 @@ class Safeguard(BaseModel):
     pid_reference: Optional[str] = Field(None, description="P&ID drawing reference")
     control_category: Optional[str] = Field(None, description="Control category, e.g. 'Prevention', 'Detection', 'Mitigation'")
     cme_name: Optional[str] = Field(None, description="Full CME/KME descriptive name from knowledge docs")
+    cme_id: Optional[str] = Field(None, description="CME ID from CME register table in knowledge docs, e.g. 'CME-001'")
 
 
 class RiskScore(BaseModel):

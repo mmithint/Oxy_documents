@@ -12,6 +12,8 @@ import type {
   GenerateCausesResponse,
   DeviationConsequences,
   ConsequenceGenerationResponse,
+  DeviationSafeguards,
+  SafeguardsGenerationResponse,
 } from "../types/hazop";
 
 const api = axios.create({
@@ -254,10 +256,14 @@ export async function getReviewStats(reportId: string): Promise<ReviewStats> {
 export async function generateCauses(
   nodeId: string,
   selectedDeviationTypes?: string[],
+  causeIncludedTags?: string[],
+  causeExcludedTags?: string[],
 ): Promise<GenerateCausesResponse> {
   const res = await api.post<GenerateCausesResponse>("/hazop/generate-causes", {
     node_id: nodeId,
     selected_deviation_types: selectedDeviationTypes ?? null,
+    cause_included_tags: causeIncludedTags ?? null,
+    cause_excluded_tags: causeExcludedTags ?? null,
   });
   return res.data;
 }
@@ -279,9 +285,11 @@ export async function approveCauses(
 
 export async function generateConsequences(
   nodeId: string,
+  selectedDeviationTypes?: string[],
 ): Promise<ConsequenceGenerationResponse> {
   const res = await api.post<ConsequenceGenerationResponse>("/hazop/generate-consequences", {
     node_id: nodeId,
+    selected_deviation_types: selectedDeviationTypes ?? null,
   });
   return res.data;
 }
@@ -296,6 +304,40 @@ export async function approveConsequences(
     node_id: nodeId,
     sme_name: smeName,
     deviation_consequences: deviationConsequences,
+    comments,
+  });
+  return res.data;
+}
+
+// ============================================================
+// Safeguards Review Endpoints
+// ============================================================
+
+export async function generateSafeguards(
+  nodeId: string,
+  selectedDeviationTypes?: string[],
+  safeguardIncludedTags?: string[],
+  safeguardExcludedTags?: string[],
+): Promise<SafeguardsGenerationResponse> {
+  const res = await api.post<SafeguardsGenerationResponse>("/hazop/generate-safeguards", {
+    node_id: nodeId,
+    selected_deviation_types: selectedDeviationTypes ?? null,
+    safeguard_included_tags: safeguardIncludedTags ?? null,
+    safeguard_excluded_tags: safeguardExcludedTags ?? null,
+  });
+  return res.data;
+}
+
+export async function approveSafeguards(
+  nodeId: string,
+  smeName: string,
+  deviationSafeguards: DeviationSafeguards[],
+  comments?: string,
+): Promise<Record<string, unknown>> {
+  const res = await api.post("/review/approve-safeguards", {
+    node_id: nodeId,
+    sme_name: smeName,
+    deviation_safeguards: deviationSafeguards,
     comments,
   });
   return res.data;

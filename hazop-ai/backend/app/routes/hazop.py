@@ -21,9 +21,11 @@ import re
 from app.models.api_models import (
     HAZOPGenerateRequest, HAZOPGenerateResponse,
     GenerateCausesRequest, GenerateCausesResponse, DeviationCausesItem,
-    LLMContextItem, LLMContextSummary,
+    InstrumentContextItem, LLMContextItem, LLMContextSummary,
     GenerateConsequencesRequest, GenerateConsequencesResponse,
     DeviationConsequencesItem, OverpressureCalc,
+    GenerateSafeguardsRequest, GenerateSafeguardsResponse, DeviationSafeguardsItem,
+    SafeguardReviewItem,
 )
 from app.services.hazop_generator import hazop_generator, hazop_generator_offline
 from app.services.deviation_generator import deviation_generator
@@ -106,6 +108,8 @@ def _excluded_reason_for_prefix(prefix: str) -> str:
 
 def _classify_instruments_for_llm(
     instruments: list,
+    cause_included_tags: list[str] | None = None,
+    cause_excluded_tags: list[str] | None = None,
 ) -> tuple[list[dict], list[LLMContextItem], list[LLMContextItem]]:
     """
     Split node instruments into three buckets for LLM cause generation:
@@ -114,20 +118,88 @@ def _classify_instruments_for_llm(
       included_ctx     — LLMContextItem list for the transparency panel
       excluded_ctx     — LLMContextItem list for the transparency panel
 
-    Only instruments whose failure can plausibly be a root cause (e.g. control
-    valves failing open/closed) are sent to the LLM.  Safeguards, transmitters,
-    indicators, gauges, and alarms are excluded — they do not cause deviations,
-    they respond to or measure them.
+    If cause_included_tags / cause_excluded_tags are provided (SME overrides),
+    those explicit tag lists are used instead of prefix-based classification.
+
+    Otherwise, the default prefix-based classification applies with BDV
+    conditional logic: if any instrument has prefix "BDV" in the node,
+    SDV/ESV/BDV/XV are moved from excluded to included.
     """
     included_dicts: list[dict] = []
     included_ctx: list[LLMContextItem] = []
     excluded_ctx: list[LLMContextItem] = []
 
+    # --- SME override mode ---
+    if cause_included_tags is not None or cause_excluded_tags is not None:
+        include_set = set(cause_included_tags) if cause_included_tags else set()
+        exclude_set = set(cause_excluded_tags) if cause_excluded_tags else set()
+
+        for inst in instruments:
+            inst_type = inst.instrument_type
+            if inst.tag in include_set:
+                included_dicts.append({
+                    "tag": inst.tag,
+                    "instrument_type": inst_type,
+                    "setpoint": inst.setpoint,
+                    "associated_equipment_tag": inst.associated_equipment_tag,
+                })
+                included_ctx.append(LLMContextItem(
+                    tag=inst.tag,
+                    instrument_type=inst_type,
+                    reason="Included by SME override",
+                ))
+            elif inst.tag in exclude_set:
+                excluded_ctx.append(LLMContextItem(
+                    tag=inst.tag,
+                    instrument_type=inst_type,
+                    reason="Excluded by SME override",
+                ))
+            else:
+                # Tags not in either list fall back to default classification
+                prefix = _get_tag_prefix(inst.tag)
+                if prefix in _LLM_EXCLUDED_PREFIXES:
+                    excluded_ctx.append(LLMContextItem(
+                        tag=inst.tag, instrument_type=inst_type,
+                        reason=_excluded_reason_for_prefix(prefix),
+                    ))
+                else:
+                    included_dicts.append({
+                        "tag": inst.tag, "instrument_type": inst_type,
+                        "setpoint": inst.setpoint,
+                        "associated_equipment_tag": inst.associated_equipment_tag,
+                    })
+                    included_ctx.append(LLMContextItem(
+                        tag=inst.tag, instrument_type=inst_type,
+                        reason="Process instrument — included as potential cause context",
+                    ))
+
+        return included_dicts, included_ctx, excluded_ctx
+
+    # --- Default classification with BDV conditional logic ---
+    # Check if any instrument in the node has a BDV prefix
+    bdv_in_node = any(
+        _get_tag_prefix(inst.tag) == "BDV" for inst in instruments
+    )
+    # Prefixes to exempt from exclusion when BDV is detected
+    _BDV_CONDITIONAL_PREFIXES = frozenset({"SDV", "ESV", "BDV", "XV"})
+
     for inst in instruments:
         prefix = _get_tag_prefix(inst.tag)
         inst_type = inst.instrument_type
 
-        if prefix in _LLM_EXCLUDED_PREFIXES:
+        # BDV conditional: if BDV in node, SDV/ESV/BDV/XV are included for causes
+        if bdv_in_node and prefix in _BDV_CONDITIONAL_PREFIXES:
+            reason = "Shutdown/blowdown valve — included because BDV detected in node"
+            included_dicts.append({
+                "tag": inst.tag,
+                "instrument_type": inst_type,
+                "setpoint": inst.setpoint,
+                "associated_equipment_tag": inst.associated_equipment_tag,
+            })
+            included_ctx.append(LLMContextItem(
+                tag=inst.tag, instrument_type=inst_type, reason=reason,
+            ))
+        elif prefix in _LLM_EXCLUDED_PREFIXES:
             excluded_ctx.append(LLMContextItem(
                 tag=inst.tag,
                 instrument_type=inst_type,
@@ -138,7 +210,7 @@ def _classify_instruments_for_llm(
             type_lower = inst_type.lower()
             if "control valve" in type_lower:
                 reason = "Control valve — failure (open/closed) can directly cause a deviation"
-            elif any(prefix.startswith(cv) for cv in ("PCV", "LCV", "FCV", "TCV", "HCV")):
+            elif any(prefix.startswith(cv) for cv in ("LCV", "FCV", "TCV", "HCV")):
                 reason = "Control valve — failure (open/closed) can directly cause a deviation"
             else:
                 reason = "Process instrument — included as potential cause context"
@@ -211,8 +283,17 @@ async def generate_causes(request: GenerateCausesRequest):
     #   - included_instrument_dicts: control valves sent to LLM (can be root causes)
     #   - included_ctx / excluded_ctx: for the frontend transparency panel
     included_instrument_dicts, included_ctx, excluded_ctx = _classify_instruments_for_llm(
-        node.instruments
+        node.instruments,
+        cause_included_tags=request.cause_included_tags,
+        cause_excluded_tags=request.cause_excluded_tags,
     )
+
+    # Store instrument override config on node for audit trail
+    if request.cause_included_tags is not None or request.cause_excluded_tags is not None:
+        node_data["instrument_override_config"] = {
+            "cause_included_tags": request.cause_included_tags,
+            "cause_excluded_tags": request.cause_excluded_tags,
+        }
 
     # Build equipment dicts once (always fully provided to LLM, with design pressure)
     equipment_data = [
@@ -224,13 +305,16 @@ async def generate_causes(request: GenerateCausesRequest):
         for eq in node.equipment
     ]
 
-    # Build the LLM context summary for the frontend
+    # Build the LLM context summary for the frontend (node-level, kept for backward compat)
     llm_context = LLMContextSummary(
         included_equipment=equipment_data,
         included_instruments=included_ctx,
         excluded_instruments=excluded_ctx,
         upstream_pressure_psig=node.upstream_pressure_psig,
     )
+
+    # Build a lookup for quick access to excluded tags at node level
+    excluded_tags_set = {item.tag for item in excluded_ctx}
 
     # Step 3: Enrich causes with LLM for each deviation
     deviation_causes_list: list[DeviationCausesItem] = []
@@ -248,27 +332,54 @@ async def generate_causes(request: GenerateCausesRequest):
         operating_pressure = equipment.operating_pressure if equipment else None
         design_temperature = equipment.design_temperature if equipment else None
 
-        # RAG: Retrieve knowledge context
-        knowledge_context = ""
-        try:
-            knowledge_context = await knowledge_service.retrieve_full_hazop_context(
-                equipment_type=equipment_type,
-                deviation=dev.deviation,
-                limit=5,
-            )
-        except Exception:
-            pass
+        # Per-deviation: instruments associated with this specific equipment
+        equipment_instrument_dicts = [
+            inst for inst in included_instrument_dicts
+            if inst.get("associated_equipment_tag") == dev.equipment_tag
+        ]
+        included_tags_for_dev = {d["tag"] for d in equipment_instrument_dicts}
 
-        # LLM: Enrich causes using filtered instruments + pressure context
+        # Build per-deviation InstrumentContextItem lists
+        dev_included = [
+            InstrumentContextItem(
+                tag=d["tag"],
+                instrument_type=d["instrument_type"],
+                reason="Control valve — failure (open/closed) can directly cause a deviation",
+                pid_reference=None,
+            )
+            for d in equipment_instrument_dicts
+        ]
+        dev_excluded = [
+            InstrumentContextItem(
+                tag=inst.tag,
+                instrument_type=inst.instrument_type,
+                reason=_excluded_reason_for_prefix(_get_tag_prefix(inst.tag)),
+                pid_reference=inst.pid_reference,
+            )
+            for inst in node.instruments
+            if inst.associated_equipment_tag == dev.equipment_tag
+            and inst.tag in excluded_tags_set
+            and inst.tag not in included_tags_for_dev
+        ]
+
+        # NOTE: No knowledge base context is used for cause generation.
+        # Causes are grounded ONLY in P&ID information (equipment, instruments,
+        # line connectivity, control loops, deviation locations).
+
+        # Prepare P&ID structural data for this deviation's equipment
+        node_line_connectivity = [
+            lc.model_dump(mode="json") for lc in node.line_connectivity
+        ] if node.line_connectivity else None
+        node_control_loops = [
+            cl.model_dump(mode="json") for cl in node.control_loops
+        ] if node.control_loops else None
+        node_deviation_locations = [
+            dl.model_dump(mode="json") for dl in node.deviation_locations
+        ] if node.deviation_locations else None
+
+        # LLM: Enrich causes using filtered instruments + P&ID structural data
         try:
             safeguard_descriptions = [sg.description for sg in dev.safeguards]
-
-            # Only send instruments associated with this specific equipment
-            # (control valves only — safeguards/transmitters/gauges already excluded)
-            equipment_instrument_dicts = [
-                inst for inst in included_instrument_dicts
-                if inst.get("associated_equipment_tag") == dev.equipment_tag
-            ]
 
             # If no control valves exist for this equipment and it's not a special
             # category (Human Factors / Previous Incidents), the LLM has nothing
@@ -281,6 +392,8 @@ async def generate_causes(request: GenerateCausesRequest):
                     guideword=dev.guideword.value,
                     parameter=dev.parameter.value,
                     causes=dev.causes,  # ontology causes only
+                    included_instruments=dev_included,
+                    excluded_instruments=dev_excluded,
                 ))
                 continue
 
@@ -293,11 +406,16 @@ async def generate_causes(request: GenerateCausesRequest):
                 upstream_pressure_psig=node.upstream_pressure_psig,
                 design_temperature=design_temperature,
                 existing_safeguards=safeguard_descriptions,
-                knowledge_context=knowledge_context if knowledge_context else None,
                 is_special_category=dev.requires_mandatory_sme_review,
                 # Instruments scoped to this equipment; safeguards/transmitters excluded
                 node_instruments=equipment_instrument_dicts,
                 node_equipment=equipment_data,
+                pid_summary=node.pid_summary,
+                flow_description=node.flow_description,
+                # P&ID structural data (line connectivity, control loops, deviation locations)
+                line_connectivity=node_line_connectivity,
+                control_loops=node_control_loops,
+                deviation_locations=node_deviation_locations,
             )
 
             # Causes are already validated and flattened to plain strings
@@ -317,6 +435,8 @@ async def generate_causes(request: GenerateCausesRequest):
             guideword=dev.guideword.value,
             parameter=dev.parameter.value,
             causes=merged_causes,
+            included_instruments=dev_included,
+            excluded_instruments=dev_excluded,
         ))
 
     # Store pending causes on node for later retrieval
@@ -363,7 +483,9 @@ async def generate_consequences(request: GenerateConsequencesRequest):
 
     # Rebuild the list of deviations from approved_causes (same key structure)
     from app.services.deviation_generator import deviation_generator
-    deviations = deviation_generator.generate_deviations_for_node(node)
+    deviations = deviation_generator.generate_deviations_for_node(
+        node, selected_deviation_types=request.selected_deviation_types
+    )
 
     for dev in deviations:
         # Find equipment for this deviation
@@ -402,6 +524,13 @@ async def generate_consequences(request: GenerateConsequencesRequest):
             except Exception:
                 pass
 
+        # RAG: retrieve PEC table (production-deck PAF consequence) for all deviations
+        pec_table_context = ""
+        try:
+            pec_table_context = await knowledge_service.retrieve_pec_table_context()
+        except Exception:
+            pass
+
         # RAG: retrieve consequence knowledge context
         knowledge_context = ""
         try:
@@ -412,6 +541,15 @@ async def generate_consequences(request: GenerateConsequencesRequest):
             )
         except Exception:
             pass
+
+        # Gather all P&ID instruments matched to this equipment for consequence context
+        from app.services.safeguard_classifier import match_safeguards_to_equipment
+        pid_instruments: list[dict] = []
+        if equipment:
+            pid_instruments = match_safeguards_to_equipment(
+                equipment=equipment,
+                instruments=node.instruments,
+            )
 
         # LLM: generate consequence content
         try:
@@ -426,8 +564,12 @@ async def generate_consequences(request: GenerateConsequencesRequest):
                 approved_causes=causes,
                 pressure_ratio=pressure_ratio,
                 overpressure_table_context=overpressure_table_context or None,
+                pec_table_context=pec_table_context or None,
                 knowledge_context=knowledge_context if knowledge_context else None,
                 is_special_category=dev.requires_mandatory_sme_review,
+                pid_instruments=pid_instruments or None,
+                pid_summary=node.pid_summary,
+                flow_description=node.flow_description,
             )
 
             # Build OverpressureCalc from LLM's table lookup result
@@ -461,7 +603,8 @@ async def generate_consequences(request: GenerateConsequencesRequest):
                 consequences=result.get("consequences", []),
                 scenario_comments=result.get("scenario_comments"),
                 consequence_category=result.get("consequence_category"),
-                pec=result.get("personnel_exposure"),
+                pec=result.get("pec"),
+                current_risk=result.get("current_risk"),
                 overpressure_calc=overpressure_calc,
             ))
         except Exception:
@@ -502,6 +645,191 @@ async def generate_consequences(request: GenerateConsequencesRequest):
     )
 
 
+@router.post("/generate-safeguards", response_model=GenerateSafeguardsResponse)
+async def generate_safeguards(request: GenerateSafeguardsRequest):
+    """
+    Generate safeguard (CME/KME) content for each deviation for SME review.
+
+    This runs AFTER consequence approval (approve-consequences) and BEFORE full HAZOP generation.
+    It uses:
+      - SME-approved consequences (from node_data["approved_consequences"])
+      - Safety instruments matched from P&ID (via safeguard_classifier.match_safeguards_to_equipment)
+      - RAG: HSE Risk Assessment document for PR classification, CME Name, CME ID
+      - LLM: enriches descriptions and adds mandatory safeguards (gas detection, deluge)
+
+    PR classification is NOT hardcoded — it comes entirely from the HSE Risk Assessment doc via RAG.
+    """
+    from app.services.safeguard_classifier import match_safeguards_to_equipment
+
+    node_data = await cosmos_client.get_node(request.node_id)
+    if not node_data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Node {request.node_id} not found.",
+        )
+
+    node = PIDNode(**node_data)
+    approved_consequences = node_data.get("approved_consequences", {})
+    deviation_safeguards_list: list[DeviationSafeguardsItem] = []
+
+    # Rebuild deviations using the same selected types as the user chose
+    deviations = deviation_generator.generate_deviations_for_node(
+        node, selected_deviation_types=request.selected_deviation_types
+    )
+
+    # Retrieve CME/PR classification context from HSE Risk Assessment doc (once for all deviations)
+    cme_knowledge_context = ""
+    try:
+        cme_knowledge_context = await knowledge_service.retrieve_cme_safeguard_context()
+    except Exception:
+        pass
+
+    for dev in deviations:
+        # Find equipment for this deviation
+        equipment = None
+        for eq in node.equipment:
+            if eq.tag == dev.equipment_tag:
+                equipment = eq
+                break
+
+        equipment_type = equipment.equipment_type if equipment else "Unknown"
+
+        # Get approved causes and consequences for this deviation
+        approved_causes: list[str] = []
+        approved_cons: list[str] = []
+        for _aid, adata in approved_consequences.items():
+            if (adata.get("equipment_tag") == dev.equipment_tag
+                    and adata.get("deviation") == dev.deviation):
+                approved_causes = adata.get("causes", [])
+                approved_cons = adata.get("consequences", [])
+                break
+        if not approved_causes:
+            approved_causes = dev.causes
+
+        # Match safety instruments from P&ID (returns raw dicts, no hardcoded PR classification)
+        pid_instruments: list[dict] = []
+        if equipment:
+            pid_instruments = match_safeguards_to_equipment(
+                equipment=equipment,
+                instruments=node.instruments,
+            )
+
+        # Apply SME instrument overrides for safeguard generation if provided
+        if request.safeguard_included_tags is not None or request.safeguard_excluded_tags is not None:
+            sg_include_set = set(request.safeguard_included_tags or [])
+            sg_exclude_set = set(request.safeguard_excluded_tags or [])
+            if sg_include_set or sg_exclude_set:
+                pid_instruments = [
+                    inst for inst in pid_instruments
+                    if inst.get("tag") not in sg_exclude_set
+                ]
+                # Add any instruments from include list that weren't matched by default
+                matched_tags = {inst.get("tag") for inst in pid_instruments}
+                for inst in node.instruments:
+                    if inst.tag in sg_include_set and inst.tag not in matched_tags:
+                        if not equipment or inst.associated_equipment_tag == equipment.tag:
+                            pid_instruments.append({
+                                "tag": inst.tag,
+                                "instrument_type": inst.instrument_type,
+                                "setpoint": inst.setpoint,
+                                "associated_equipment_tag": inst.associated_equipment_tag,
+                                "pid_reference": inst.pid_reference,
+                            })
+
+        # Drawing references from node
+        drawing_refs = [node.drawing_number] if getattr(node, "drawing_number", None) else []
+
+        # LLM: generate enriched safeguards with PR classification from HSE doc
+        try:
+            result = await openai_service.generate_safeguard_content(
+                equipment_type=equipment_type,
+                equipment_tag=dev.equipment_tag,
+                deviation=dev.deviation,
+                approved_causes=approved_causes,
+                approved_consequences=approved_cons,
+                pid_instruments=pid_instruments,
+                cme_knowledge_context=cme_knowledge_context or None,
+            )
+
+            safeguard_items = [
+                SafeguardReviewItem(
+                    instrument_tag=sg.get("instrument_tag", ""),
+                    description=sg.get("description", ""),
+                    pr_classification=sg.get("pr_classification", "Other"),
+                    mitigation_type=sg.get("mitigation_type"),
+                    pid_reference=sg.get("pid_reference"),
+                    control_category=sg.get("control_category"),
+                    cme_name=sg.get("cme_name"),
+                    cme_id=sg.get("cme_id"),
+                )
+                for sg in result.get("safeguards", [])
+            ]
+        except Exception:
+            # Fallback: create minimal entries from P&ID instruments
+            safeguard_items = [
+                SafeguardReviewItem(
+                    instrument_tag=inst["tag"],
+                    description=(
+                        f"{inst['instrument_type']} ({inst['tag']})"
+                        if inst.get("instrument_type", "Other") != "Other"
+                        else inst["tag"]
+                    ),
+                    pr_classification="Other",
+                    mitigation_type=None,
+                    pid_reference=inst.get("pid_reference"),
+                    control_category=None,
+                    cme_name=None,
+                    cme_id=None,
+                )
+                for inst in pid_instruments
+            ]
+
+        # Get intermediate consequences and consequence fields from approved_consequences
+        intermediate_cons: list[str] = []
+        scenario_comments_val = None
+        consequence_category_val = None
+        pec_val = None
+        current_risk_val = None
+        for _aid, adata in approved_consequences.items():
+            if (adata.get("equipment_tag") == dev.equipment_tag
+                    and adata.get("deviation") == dev.deviation):
+                intermediate_cons = adata.get("intermediate_consequences", [])
+                scenario_comments_val = adata.get("scenario_comments")
+                consequence_category_val = adata.get("consequence_category")
+                pec_val = adata.get("pec")
+                current_risk_val = adata.get("current_risk")
+                break
+
+        deviation_safeguards_list.append(DeviationSafeguardsItem(
+            deviation_id=dev.deviation_id,
+            equipment_tag=dev.equipment_tag,
+            deviation=dev.deviation,
+            guideword=dev.guideword.value,
+            parameter=dev.parameter.value,
+            causes=approved_causes,
+            drawing_references=drawing_refs,
+            intermediate_consequences=intermediate_cons,
+            consequences=approved_cons,
+            scenario_comments=scenario_comments_val,
+            consequence_category=consequence_category_val,
+            pec=pec_val,
+            current_risk=current_risk_val,
+            safeguards=safeguard_items,
+        ))
+
+    # Store pending safeguards on node for later retrieval
+    node_data["pending_safeguards_review"] = [
+        item.model_dump(mode="json") for item in deviation_safeguards_list
+    ]
+    await cosmos_client.save_node(node_data)
+
+    return GenerateSafeguardsResponse(
+        message=f"Generated safeguards for {len(deviation_safeguards_list)} deviations",
+        node_id=request.node_id,
+        deviation_safeguards=deviation_safeguards_list,
+    )
+
+
 @router.post("/generate", response_model=HAZOPGenerateResponse)
 async def generate_hazop(request: HAZOPGenerateRequest):
     """
@@ -529,9 +857,10 @@ async def generate_hazop(request: HAZOPGenerateRequest):
             detail="Node has no equipment. SME must validate equipment list first.",
         )
 
-    # Load SME-approved causes and consequences if available
+    # Load SME-approved causes, consequences and safeguards if available
     approved_causes = node_data.get("approved_causes")
     approved_consequences = node_data.get("approved_consequences")
+    approved_safeguards = node_data.get("approved_safeguards")
 
     # Generate HAZOP
     report = await hazop_generator.generate_full_hazop(
@@ -540,6 +869,7 @@ async def generate_hazop(request: HAZOPGenerateRequest):
         selected_deviation_types=request.selected_deviation_types,
         approved_causes=approved_causes,
         approved_consequences=approved_consequences,
+        approved_safeguards=approved_safeguards,
     )
 
     return HAZOPGenerateResponse(

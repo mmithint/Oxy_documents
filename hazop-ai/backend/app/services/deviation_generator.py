@@ -27,7 +27,7 @@ from app.models.hazop_models import (
     ReviewStatus, PRClassification,
 )
 from app.services.ontology_engine import get_deviations_for_equipment, get_equipment_ontology
-from app.services.safeguard_classifier import classify_instrument, match_safeguards_to_equipment
+from app.services.safeguard_classifier import match_safeguards_to_equipment
 
 
 class DeviationGeneratorService:
@@ -80,15 +80,30 @@ class DeviationGeneratorService:
         )
 
         if not ontology_deviations:
-            # Unknown equipment type — create a minimal generic deviation
-            deviations.append(self._create_generic_deviation(equipment, node))
+            # Unknown equipment type — skip silently (no generic placeholder deviations)
+            # deviations.append(self._create_generic_deviation(equipment, node))
             return deviations
 
-        # Find safeguards associated with this equipment
-        matched_safeguards = match_safeguards_to_equipment(
+        # Find safeguards associated with this equipment (returns raw instrument dicts)
+        # PR classification is determined later by LLM from HSE Risk Assessment doc
+        raw_instruments = match_safeguards_to_equipment(
             equipment=equipment,
             instruments=node.instruments,
         )
+        matched_safeguards = [
+            Safeguard(
+                instrument_tag=inst["tag"],
+                description=(
+                    f"{inst['instrument_type']} ({inst['tag']})"
+                    if inst["instrument_type"] != "Other"
+                    else inst["tag"]
+                ),
+                pr_classification=PRClassification.OTHER,  # Placeholder; real value set during safeguard review
+                mitigation_type=None,
+                pid_reference=inst.get("pid_reference"),
+            )
+            for inst in raw_instruments
+        ]
 
         for dev_data in ontology_deviations:
             deviation = self._create_deviation_from_ontology(

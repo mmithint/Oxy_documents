@@ -65,7 +65,7 @@ const SAFETY_DEVICE_TYPES = COMMON_INSTRUMENT_TYPES.filter(
 
 interface EquipmentReviewTableProps {
   node: PIDNode;
-  onValidated: () => void;
+  onValidated: (updatedNode: PIDNode) => void;
 }
 
 export default function EquipmentReviewTable({ node, onValidated }: EquipmentReviewTableProps) {
@@ -430,7 +430,14 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
       const pressure = upstreamPressure ? parseFloat(upstreamPressure) : null;
       await validateEquipment(node.node_id, equipment, instruments, smeName, undefined, pressure);
       setMessage("Equipment validated successfully");
-      onValidated();
+      const updatedNode: PIDNode = {
+        ...node,
+        equipment,
+        instruments,
+        upstream_pressure_psig: pressure,
+        validated_by: smeName,
+      };
+      onValidated(updatedNode);
     } catch {
       setMessage("Validation failed");
     } finally {
@@ -461,6 +468,28 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
           Download
         </button>
       </div>
+
+      {/* P&ID Summary — shown if AI extracted a summary and/or flow description */}
+      {(node.pid_summary || node.flow_description) && (
+        <div className="px-4 py-3 bg-blue-50/50 border-b border-blue-100 space-y-2">
+          {node.pid_summary && (
+            <div>
+              <span className="text-[10px] font-semibold text-blue-700 uppercase tracking-wide">
+                P&ID Overview
+              </span>
+              <p className="text-xs text-gray-700 mt-0.5">{node.pid_summary}</p>
+            </div>
+          )}
+          {node.flow_description && (
+            <div>
+              <span className="text-[10px] font-semibold text-blue-700 uppercase tracking-wide">
+                Process Flow
+              </span>
+              <p className="text-xs text-gray-700 mt-0.5">{node.flow_description}</p>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Equipment Table */}
       <div className="px-4 py-3">

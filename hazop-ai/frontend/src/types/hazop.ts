@@ -11,7 +11,7 @@ export type InstrumentType = string;
 
 export const COMMON_EQUIPMENT_TYPES: string[] = [
   "Separator", "Header", "Compressor", "Pump", "Heat Exchanger",
-  "Vessel", "Tank", "Scrubber", "Knockout Drum", "Flare", "Other",
+  "Vessel", "Tank", "Scrubber", "Knockout Drum", "Flare", "Piping", "Other",
 ];
 
 export const COMMON_INSTRUMENT_TYPES: string[] = [
@@ -78,6 +78,32 @@ export interface Instrument {
   pid_reference: string | null;
 }
 
+export interface LineConnection {
+  from_tag: string;
+  to_tag: string;
+  line_id: string | null;
+  fluid_phase: string | null;
+  pipe_size: string | null;
+  description: string | null;
+}
+
+export interface ControlLoop {
+  loop_id: string | null;
+  controlled_variable: string;
+  measuring_element: string | null;
+  controller: string | null;
+  final_element: string;
+  controlled_equipment: string;
+  description: string | null;
+}
+
+export interface DeviationLocationMapping {
+  equipment_tag: string;
+  susceptible_deviations: string[];
+  drawing_reference: string | null;
+  location_description: string | null;
+}
+
 export interface PIDNode {
   node_id: string;
   node_name: string;
@@ -88,6 +114,11 @@ export interface PIDNode {
   drawing_number: string | null;
   description: string | null;
   upstream_pressure_psig: number | null;
+  pid_summary: string | null;
+  flow_description: string | null;
+  line_connectivity: LineConnection[];
+  control_loops: ControlLoop[];
+  deviation_locations: DeviationLocationMapping[];
   validated_by?: string;
   validated_at?: string;
 }
@@ -213,6 +244,13 @@ export const RISK_LABELS: Record<RiskLevel, string> = {
 
 // --- Causes Review Types ---
 
+export interface InstrumentContext {
+  tag: string;
+  instrument_type: string;
+  reason: string;
+  pid_reference?: string | null;
+}
+
 export interface DeviationCauses {
   deviation_id: string;
   equipment_tag: string;
@@ -220,6 +258,8 @@ export interface DeviationCauses {
   guideword: string;
   parameter: string;
   causes: string[];
+  included_instruments: InstrumentContext[];
+  excluded_instruments: InstrumentContext[];
 }
 
 export interface LLMContextItem {
@@ -279,7 +319,10 @@ export interface DeviationConsequences {
   consequences: string[];
   scenario_comments: string | null;
   consequence_category: string | null;
+  /** PEC number from Production-Deck PAF table, e.g. "PEC-1", "PEC-2" */
   pec: string | null;
+  /** Current risk level from table, e.g. "C5". PEC-1 → C5. */
+  current_risk: string | null;
   overpressure_calc: OverpressureCalc | null;
 }
 
@@ -287,6 +330,52 @@ export interface ConsequenceGenerationResponse {
   message: string;
   node_id: string;
   deviation_consequences: DeviationConsequences[];
+}
+
+// --- Safeguards Review Types ---
+
+export interface SafeguardReview {
+  instrument_tag: string;
+  description: string;
+  pr_classification: string;
+  mitigation_type: string | null;
+  pid_reference: string | null;
+  control_category: string | null;
+  cme_name: string | null;
+  cme_id: string | null;
+}
+
+export interface DeviationSafeguards {
+  deviation_id: string;
+  equipment_tag: string;
+  deviation: string;
+  guideword: string;
+  parameter: string;
+  causes: string[];
+  drawing_references: string[];
+  intermediate_consequences: string[];
+  consequences: string[];
+  scenario_comments: string | null;
+  consequence_category: string | null;
+  pec: string | null;
+  current_risk: string | null;
+  safeguards: SafeguardReview[];
+}
+
+export interface SafeguardsGenerationResponse {
+  message: string;
+  node_id: string;
+  deviation_safeguards: DeviationSafeguards[];
+}
+
+// --- Instrument Classification Config (Step 2 → Step 3/6) ---
+
+export interface InstrumentClassificationConfig {
+  cause_included_tags: string[];
+  cause_excluded_tags: string[];
+  safeguard_included_tags: string[];
+  safeguard_excluded_tags: string[];
+  bdv_auto_include_active: boolean;
 }
 
 export const STATUS_COLORS: Record<ReviewStatus, string> = {
