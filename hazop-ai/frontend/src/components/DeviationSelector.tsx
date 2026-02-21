@@ -18,7 +18,7 @@ const AI_CATEGORIES = new Set(["Human Factors", "Previous Incidents / Learnings"
 
 // Prefixes whose instruments should be INCLUDED for cause generation
 const CAUSE_INCLUDE_PREFIXES = new Set([
-  "LCV", "FCV", "PCV", "TCV", "HCV",  // Control valves
+  "LCV", "FCV", "TCV", "HCV",  // Control valves
 ]);
 
 // Prefixes that are conditionally included for causes IF BDV exists in the node

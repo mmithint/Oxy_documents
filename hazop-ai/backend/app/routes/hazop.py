@@ -422,11 +422,11 @@ async def generate_causes(request: GenerateCausesRequest):
             # inside generate_deviation_content() — no further filtering needed.
             llm_causes = result.get("causes", [])
 
-            # Merge LLM causes with ontology causes
-            merged_causes = hazop_generator._merge_lists(dev.causes, llm_causes)
+            # Use only LLM (P&ID-grounded) causes, no ontology merge
+            merged_causes = llm_causes
         except Exception:
-            # LLM failure: keep ontology causes as-is
-            merged_causes = dev.causes
+            # LLM failure: return empty list (no fallback to ontology)
+            merged_causes = []
 
         deviation_causes_list.append(DeviationCausesItem(
             deviation_id=dev.deviation_id,
@@ -508,7 +508,7 @@ async def generate_consequences(request: GenerateConsequencesRequest):
                 causes = adata.get("causes", [])
                 break
         if not causes:
-            causes = dev.causes  # fall back to ontology causes
+            causes = []  # no fallback to ontology causes
 
         # Calculate pressure ratio (pure math) — thresholds and hole sizes come from RAG
         pressure_ratio: float | None = None

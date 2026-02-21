@@ -309,8 +309,8 @@ class HAZOPGeneratorService:
             # Merge LLM causes with ontology causes (deduplicate)
             # Skip if causes were pre-approved by SME
             if not skip_causes:
-                llm_causes = result.get("causes", [])
-                deviation.causes = self._merge_lists(deviation.causes, llm_causes)
+                # Use only LLM (P&ID-grounded) causes, no ontology merge
+                deviation.causes = result.get("causes", [])
 
             # Drawing references — prefer node.drawing_number over LLM guess
             if node and getattr(node, "drawing_number", None):
@@ -323,9 +323,8 @@ class HAZOPGeneratorService:
                 # Intermediate consequences
                 deviation.intermediate_consequences = result.get("intermediate_consequences", [])
 
-                # Final impacts / consequences (merge with ontology)
-                llm_consequences = result.get("consequences", [])
-                deviation.consequences = self._merge_lists(deviation.consequences, llm_consequences)
+                # Use only LLM (P&ID-grounded) consequences, no ontology merge
+                deviation.consequences = result.get("consequences", [])
 
                 # Scenario comments
                 deviation.scenario_comments = result.get("scenario_comments")
@@ -368,8 +367,9 @@ class HAZOPGeneratorService:
                     pass
 
         except Exception:
-            # LLM failure: keep ontology causes/consequences as-is
-            pass
+            # LLM failure: clear ontology causes/consequences
+            deviation.causes = []
+            deviation.consequences = []
 
     def _enrich_safeguards(
         self,
