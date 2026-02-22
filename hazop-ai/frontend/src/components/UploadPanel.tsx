@@ -1,6 +1,7 @@
 import { useState, useRef } from "react";
-import { uploadPID, uploadKnowledgeDocument } from "../services/api";
-import type { PIDNode } from "../types/hazop";
+import { uploadPID, uploadKnowledgeDocument, comparePIDExtraction } from "../services/api";
+import type { PIDNode, ExtractionCompareResponse } from "../types/hazop";
+import ExtractionComparisonView from "./ExtractionComparisonView";
 
 interface UploadPanelProps {
   onNodesExtracted: (nodes: PIDNode[]) => void;
@@ -32,6 +33,10 @@ export default function UploadPanel({ onNodesExtracted, onExtractionDetails }: U
   const [progressFiles, setProgressFiles] = useState<FileProgress[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [totalFiles, setTotalFiles] = useState(0);
+
+  const [comparing, setComparing] = useState(false);
+  const [compareResult, setCompareResult] = useState<ExtractionCompareResponse | null>(null);
+  const [compareError, setCompareError] = useState("");
 
   const pidInputRef = useRef<HTMLInputElement>(null);
   const knowledgeInputRef = useRef<HTMLInputElement>(null);
@@ -177,6 +182,23 @@ export default function UploadPanel({ onNodesExtracted, onExtractionDetails }: U
     setProgressFiles([]);
   };
 
+  // ---- GPT vs Claude Compare ----
+  const handleCompare = async () => {
+    if (pidFiles.length === 0) return;
+    const file = pidFiles[0]; // Compare uses the first selected file only
+    setComparing(true);
+    setCompareError("");
+    setCompareResult(null);
+    try {
+      const result = await comparePIDExtraction(file);
+      setCompareResult(result);
+    } catch (err: unknown) {
+      setCompareError(err instanceof Error ? err.message : "Comparison failed");
+    } finally {
+      setComparing(false);
+    }
+  };
+
   const isAllDone = currentIndex >= totalFiles;
 
   return (
@@ -205,13 +227,28 @@ export default function UploadPanel({ onNodesExtracted, onExtractionDetails }: U
           {pidFiles.length > 1 && (
             <p className="text-xs text-blue-600">{pidFiles.length} files selected</p>
           )}
-          <button
-            onClick={handlePIDUpload}
-            disabled={pidFiles.length === 0 || uploading}
-            className="w-full px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
-          >
-            {uploading ? "Processing..." : `Upload & Parse P&ID${pidFiles.length > 1 ? ` (${pidFiles.length})` : ""}`}
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={handlePIDUpload}
+              disabled={pidFiles.length === 0 || uploading || comparing}
+              className="flex-1 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+            >
+              {uploading ? "Processing..." : `Upload & Parse P&ID${pidFiles.length > 1 ? ` (${pidFiles.length})` : ""}`}
+            </button>
+            <button
+              onClick={handleCompare}
+              disabled={pidFiles.length === 0 || uploading || comparing}
+              title="Compare GPT-4 vs Claude extraction on the first selected PDF"
+              className="px-3 py-2 text-sm font-medium text-white bg-purple-600 rounded hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed whitespace-nowrap"
+            >
+              {comparing ? "Comparing…" : "⚖️ Compare"}
+            </button>
+          </div>
+          {compareError && (
+            <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1">
+              {compareError}
+            </p>
+          )}
         </div>
       </div>
 
@@ -363,6 +400,14 @@ export default function UploadPanel({ onNodesExtracted, onExtractionDetails }: U
             </div>
           </div>
         </div>
+      )}
+
+      {/* GPT vs Claude Comparison Modal */}
+      {compareResult && (
+        <ExtractionComparisonView
+          result={compareResult}
+          onClose={() => setCompareResult(null)}
+        />
       )}
     </div>
   );

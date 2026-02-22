@@ -404,3 +404,22 @@ export const STATUS_COLORS: Record<ReviewStatus, string> = {
   rejected: "bg-red-100 text-red-700",
   revision_requested: "bg-amber-100 text-amber-700",
 };
+
+// --- GPT vs Claude Extraction Comparison ---
+
+export interface ExtractionCompareResponse {
+  file_name: string;
+  ocr_chunks_count: number;
+  pages_count: number;
+  gpt_equipment: Record<string, unknown>[];
+  gpt_instruments: Record<string, unknown>[];
+  gpt_duration_ms: number;
+  gpt_error: string | null;
+  claude_equipment: Record<string, unknown>[];
+  claude_instruments: Record<string, unknown>[];
+  claude_duration_ms: number;
+  claude_error: string | null;
+  tags_in_both: string[];
+  tags_only_in_gpt: string[];
+  tags_only_in_claude: string[];
+}

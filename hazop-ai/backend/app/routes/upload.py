@@ -8,7 +8,9 @@ Endpoints:
   GET  /api/upload/capabilities     → Server capability flags (DWG conversion available, etc.)
 """
 
+import asyncio
 import re
+import time
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 
@@ -16,8 +18,10 @@ from app.services.blob_storage import blob_storage
 from app.services.document_intelligence import doc_intelligence
 from app.services.knowledge_service import knowledge_service
 from app.services.dwg_converter import dwg_converter, DWGConversionError
+from app.services.openai_service import openai_service
+from app.services.claude_service import claude_service
 from app.database.cosmos_client import cosmos_client
-from app.models.api_models import UploadResponse
+from app.models.api_models import UploadResponse, ExtractionCompareResponse
 
 router = APIRouter()
 
@@ -256,6 +260,127 @@ async def list_nodes():
     """List all extracted nodes."""
     nodes = await cosmos_client.get_all_nodes()
     return {"nodes": nodes, "count": len(nodes)}
+
+
+@router.post("/pid/compare", response_model=ExtractionCompareResponse)
+async def compare_pid_extraction(file: UploadFile = File(...)):
+    """
+    Upload a P&ID PDF and compare GPT-4 vs Claude extraction side by side.
+
+    OCR runs once; both models receive identical inputs in parallel.
+    Response includes per-model equipment/instrument lists plus a tag diff summary.
+    """
+    if file.content_type and file.content_type not in _DIRECT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported file type: {file.content_type}. "
+                "The compare endpoint accepts PDF and image files only (not DWG)."
+            ),
+        )
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Empty file uploaded")
+
+    # Step 1: OCR + image conversion — run once, share between both models
+    pid_inputs = await doc_intelligence.prepare_pid_inputs(file_bytes, file.filename or "unknown.pdf")
+    chunks: list[str] = pid_inputs["chunks"]
+    images: list[dict] = pid_inputs["images_base64"]
+    ocr_hint: str | None = pid_inputs["raw_text"][:3000] if pid_inputs.get("raw_text") else None
+
+    # Step 2: Run GPT-4 and Claude in parallel
+    async def run_gpt():
+        t0 = time.monotonic()
+        try:
+            text_res = await openai_service.extract_pid_data(chunks, file.filename or "unknown.pdf")
+            vision_res = await openai_service.extract_pid_data_with_vision(
+                images, file.filename or "unknown.pdf", ocr_hint
+            )
+            merged = _simple_merge(text_res, vision_res)
+            return merged, int((time.monotonic() - t0) * 1000), None
+        except Exception as e:
+            return {}, int((time.monotonic() - t0) * 1000), str(e)
+
+    async def run_claude():
+        t0 = time.monotonic()
+        try:
+            text_res = await claude_service.extract_pid_data(chunks, file.filename or "unknown.pdf")
+            vision_res = await claude_service.extract_pid_data_with_vision(
+                images, file.filename or "unknown.pdf", ocr_hint
+            )
+            merged = _simple_merge(text_res, vision_res)
+            return merged, int((time.monotonic() - t0) * 1000), None
+        except Exception as e:
+            return {}, int((time.monotonic() - t0) * 1000), str(e)
+
+    (gpt_data, gpt_ms, gpt_err), (claude_data, claude_ms, claude_err) = await asyncio.gather(
+        run_gpt(), run_claude()
+    )
+
+    # Step 3: Build tag diff summary
+    gpt_eq_tags = {e.get("tag", "").upper() for e in gpt_data.get("equipment", []) if e.get("tag")}
+    gpt_inst_tags = {i.get("tag", "").upper() for i in gpt_data.get("instruments", []) if i.get("tag")}
+    gpt_tags = gpt_eq_tags | gpt_inst_tags
+
+    claude_eq_tags = {e.get("tag", "").upper() for e in claude_data.get("equipment", []) if e.get("tag")}
+    claude_inst_tags = {i.get("tag", "").upper() for i in claude_data.get("instruments", []) if i.get("tag")}
+    claude_tags = claude_eq_tags | claude_inst_tags
+
+    return ExtractionCompareResponse(
+        file_name=file.filename or "unknown.pdf",
+        ocr_chunks_count=len(chunks),
+        pages_count=len(images),
+        gpt_equipment=gpt_data.get("equipment", []),
+        gpt_instruments=gpt_data.get("instruments", []),
+        gpt_duration_ms=gpt_ms,
+        gpt_error=gpt_err,
+        claude_equipment=claude_data.get("equipment", []),
+        claude_instruments=claude_data.get("instruments", []),
+        claude_duration_ms=claude_ms,
+        claude_error=claude_err,
+        tags_in_both=sorted(gpt_tags & claude_tags),
+        tags_only_in_gpt=sorted(gpt_tags - claude_tags),
+        tags_only_in_claude=sorted(claude_tags - gpt_tags),
+    )
+
+
+def _simple_merge(text_res: dict, vision_res: dict) -> dict:
+    """
+    Merge text and vision extraction results by deduplicating on tag.
+    Text result is primary; vision adds tags not already found.
+    """
+    eq_seen: set[str] = set()
+    equipment: list[dict] = []
+    for item in text_res.get("equipment", []):
+        tag = (item.get("tag") or "").strip().upper()
+        if tag and tag not in eq_seen:
+            eq_seen.add(tag)
+            equipment.append(item)
+    for item in vision_res.get("equipment", []):
+        tag = (item.get("tag") or "").strip().upper()
+        if tag and tag not in eq_seen:
+            eq_seen.add(tag)
+            equipment.append(item)
+
+    inst_seen: set[str] = set()
+    instruments: list[dict] = []
+    for item in text_res.get("instruments", []):
+        tag = (item.get("tag") or "").strip().upper()
+        if tag and tag not in inst_seen:
+            inst_seen.add(tag)
+            instruments.append(item)
+    for item in vision_res.get("instruments", []):
+        tag = (item.get("tag") or "").strip().upper()
+        if tag and tag not in inst_seen:
+            inst_seen.add(tag)
+            instruments.append(item)
+
+    return {
+        **text_res,
+        "equipment": equipment,
+        "instruments": instruments,
+    }
 
 
 def _normalize_drawing_number(raw: str | None) -> str | None:

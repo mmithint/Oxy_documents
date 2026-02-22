@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # Example (Linux):   /usr/bin/ODAFileConverter
     ODA_CONVERTER_PATH: str = ""
 
+    # Anthropic Claude API (for GPT vs Claude comparison feature)
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-sonnet-4-6"
+
     class Config:
         env_file = ".env"
         case_sensitive = True

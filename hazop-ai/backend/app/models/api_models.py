@@ -343,3 +343,29 @@ class ApproveSafeguardsResponse(BaseModel):
     node_id: str
     deviations_count: int
     approved: bool = True
+
+
+# --- GPT vs Claude Extraction Comparison ---
+
+class ExtractionCompareResponse(BaseModel):
+    """Side-by-side comparison of GPT-4 vs Claude P&ID extraction results."""
+    file_name: str
+    ocr_chunks_count: int
+    pages_count: int
+
+    # GPT-4 result
+    gpt_equipment: list[dict] = []
+    gpt_instruments: list[dict] = []
+    gpt_duration_ms: int = 0
+    gpt_error: Optional[str] = None
+
+    # Claude result
+    claude_equipment: list[dict] = []
+    claude_instruments: list[dict] = []
+    claude_duration_ms: int = 0
+    claude_error: Optional[str] = None
+
+    # Tag diff summary
+    tags_in_both: list[str] = []
+    tags_only_in_gpt: list[str] = []
+    tags_only_in_claude: list[str] = []

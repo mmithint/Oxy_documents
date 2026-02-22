@@ -140,6 +140,37 @@ class DocumentIntelligenceService:
             )
         return self._client
 
+    async def prepare_pid_inputs(
+        self,
+        file_content: bytes,
+        source_filename: str,
+    ) -> dict:
+        """
+        Run OCR + image conversion only — no LLM call.
+
+        Returns OCR chunks and page images ready to pass to any LLM.
+        Called by the /pid/compare route so both GPT and Claude share
+        the same OCR output.
+        """
+        # Azure Document Intelligence OCR
+        poller = self.client.begin_analyze_document(
+            model_id="prebuilt-layout",
+            body=AnalyzeDocumentRequest(bytes_source=file_content),
+        )
+        result = poller.result()
+        raw_text = self._extract_full_text(result)
+        chunks = self._chunk_ocr_text(raw_text, chunk_size=1000, overlap=100)
+
+        # PDF → PNG images for vision
+        content_type = self._guess_content_type(source_filename)
+        images_base64 = self._convert_to_images(file_content, content_type)
+
+        return {
+            "chunks": chunks,
+            "images_base64": images_base64,
+            "raw_text": raw_text,
+        }
+
     async def parse_pid(
         self,
         file_content: bytes,
