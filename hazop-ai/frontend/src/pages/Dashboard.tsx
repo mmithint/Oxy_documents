@@ -11,26 +11,14 @@ import ExtractionDetails from "../components/ExtractionDetails";
 import { generateHAZOP, generateHAZOPQuick, getHAZOPByNode, checkBackendConnection } from "../services/api";
 
 // ---------------------------------------------------------------------------
-// Instrument classification helper (mirrors EquipmentReviewTable logic)
+// Instrument classification helper — reads instrument_role from data
 // ---------------------------------------------------------------------------
-const SAFETY_DEVICE_PREFIXES = new Set([
-  "PSH", "PSL", "PSHH", "PSLL",
-  "LSH", "LSL", "LSHH", "LSLL",
-  "TSH", "TSL", "TSHH", "TSLL",
-  "FSH", "FSL", "FSHH", "FSLL",
-  "PSV", "PRV", "SV", "RV",
-  "GD", "GDS", "FD",
-  "SDV", "ESV", "BDV", "XV",
-]);
-const SAFETY_TYPE_KEYWORDS = [
-  "safety valve", "switch high", "switch low",
-  "gas detector", "fire detector", "deluge",
-  "emergency shutdown", "shutdown valve", "blowdown valve", "relief valve",
-];
 function isSafetyDevice(inst: Instrument): boolean {
-  const prefix = inst.tag.toUpperCase().match(/^([A-Z]+)/)?.[1] ?? "";
-  if (SAFETY_DEVICE_PREFIXES.has(prefix)) return true;
-  return SAFETY_TYPE_KEYWORDS.some((kw) => inst.instrument_type.toLowerCase().includes(kw));
+  return inst.instrument_role === "safeguard";
+}
+
+function isCauseInstrument(inst: Instrument): boolean {
+  return inst.instrument_role === "cause";
 }
 
 type WorkflowStep = "upload" | "validate" | "select_deviations" | "review_causes" | "review_consequences" | "review_safeguards" | "generate" | "review";
@@ -429,7 +417,7 @@ function CollapsibleSection({
 }
 
 function NodeInfoCard({ node }: { node: PIDNode }) {
-  const instruments = node.instruments.filter((i) => !isSafetyDevice(i));
+  const causeInstruments = node.instruments.filter(isCauseInstrument);
   const safetyDevices = node.instruments.filter(isSafetyDevice);
 
   return (
@@ -444,9 +432,9 @@ function NodeInfoCard({ node }: { node: PIDNode }) {
       {/* Expandable sections */}
       <div className="px-3 py-3 space-y-2">
 
-        {/* Equipment */}
+        {/* 1. Major Equipment */}
         <CollapsibleSection
-          title="Equipment"
+          title="Major Equipment"
           count={node.equipment.length}
           accentColor="bg-blue-50 text-blue-700"
           defaultOpen={true}
@@ -455,42 +443,57 @@ function NodeInfoCard({ node }: { node: PIDNode }) {
             <p className="px-3 py-2 text-xs text-gray-400 italic">No equipment</p>
           ) : (
             node.equipment.map((eq) => (
-              <div key={eq.tag} className="flex items-center gap-2 px-3 py-1.5">
-                <span className="font-mono text-xs text-blue-700 font-medium w-20 flex-shrink-0 truncate">
-                  {eq.tag}
-                </span>
-                <span className="text-xs text-gray-600 truncate">{eq.equipment_type}</span>
-                {eq.design_pressure != null && (
-                  <span className="ml-auto text-[10px] text-gray-400 flex-shrink-0 font-mono">
-                    {eq.design_pressure} PSIG
+              <div key={eq.tag} className="px-3 py-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs text-blue-700 font-medium w-20 flex-shrink-0 truncate">
+                    {eq.tag}
                   </span>
+                  <span className="text-xs text-gray-600 truncate">{eq.equipment_type}</span>
+                  {eq.design_pressure != null && (
+                    <span className="ml-auto text-[10px] text-gray-400 flex-shrink-0 font-mono">
+                      {eq.design_pressure} PSIG
+                    </span>
+                  )}
+                </div>
+                {((eq.upstream_equipment || []).length > 0 || (eq.downstream_equipment || []).length > 0) && (
+                  <div className="ml-20 mt-0.5 text-[10px] text-gray-400 space-y-0.5">
+                    {(eq.upstream_equipment || []).length > 0 && (
+                      <div><span className="text-gray-500">↑ </span>{(eq.upstream_equipment || []).join(", ")}</div>
+                    )}
+                    {(eq.downstream_equipment || []).length > 0 && (
+                      <div><span className="text-gray-500">↓ </span>{(eq.downstream_equipment || []).join(", ")}</div>
+                    )}
+                  </div>
                 )}
               </div>
             ))
           )}
         </CollapsibleSection>
 
-        {/* Instruments */}
+        {/* 2. Instruments (Cause) */}
         <CollapsibleSection
-          title="Instruments"
-          count={instruments.length}
+          title="Instruments (Cause)"
+          count={causeInstruments.length}
           accentColor="bg-purple-50 text-purple-700"
         >
-          {instruments.length === 0 ? (
-            <p className="px-3 py-2 text-xs text-gray-400 italic">No instruments</p>
+          {causeInstruments.length === 0 ? (
+            <p className="px-3 py-2 text-xs text-gray-400 italic">No cause instruments</p>
           ) : (
-            instruments.map((inst) => (
+            causeInstruments.map((inst) => (
               <div key={inst.tag} className="flex items-center gap-2 px-3 py-1.5">
                 <span className="font-mono text-xs text-purple-700 font-medium w-20 flex-shrink-0 truncate">
                   {inst.tag}
                 </span>
                 <span className="text-xs text-gray-600 truncate">{inst.instrument_type}</span>
+                {inst.position && (
+                  <span className="ml-auto text-[10px] text-gray-400 flex-shrink-0 capitalize">{inst.position}</span>
+                )}
               </div>
             ))
           )}
         </CollapsibleSection>
 
-        {/* Safety Devices */}
+        {/* 3. Safety Devices / Mitigation */}
         <CollapsibleSection
           title="Safety Devices"
           count={safetyDevices.length}
@@ -505,6 +508,11 @@ function NodeInfoCard({ node }: { node: PIDNode }) {
                   {sd.tag}
                 </span>
                 <span className="text-xs text-gray-600 truncate">{sd.instrument_type}</span>
+                {sd.setpoint != null && (
+                  <span className="ml-auto text-[10px] text-gray-400 flex-shrink-0 font-mono">
+                    {sd.setpoint} PSIG
+                  </span>
+                )}
               </div>
             ))
           )}

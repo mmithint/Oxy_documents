@@ -49,6 +49,8 @@ class Equipment(BaseModel):
     design_temperature: Optional[float] = Field(None, description="Design temperature in °F")
     operating_pressure: Optional[float] = Field(None, description="Normal operating pressure in PSIG")
     operating_temperature: Optional[float] = Field(None, description="Normal operating temperature in °F")
+    upstream_equipment: list[str] = Field(default_factory=list, description="Tags of equipment feeding into this equipment (upstream connections)")
+    downstream_equipment: list[str] = Field(default_factory=list, description="Tags of equipment this equipment feeds into (downstream connections)")
 
 
 class Instrument(BaseModel):
@@ -58,6 +60,9 @@ class Instrument(BaseModel):
     setpoint: Optional[float] = Field(None, description="Setpoint value if known")
     associated_equipment_tag: Optional[str] = Field(None, description="Tag of equipment this instrument protects")
     pid_reference: Optional[str] = Field(None, description="P&ID drawing reference number")
+    instrument_role: Optional[str] = Field(None, description="HAZOP role: 'cause' (control/shutdown valve whose failure causes deviations) or 'safeguard' (safety device that mitigates consequences)")
+    position: Optional[str] = Field(None, description="Position relative to associated equipment: 'upstream' or 'downstream'")
+    line_phase: Optional[str] = Field(None, description="Fluid phase of the line this instrument is on: 'gas' or 'liquid'")
 
 
 class LineConnection(BaseModel):

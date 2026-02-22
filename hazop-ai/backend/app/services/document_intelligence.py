@@ -542,6 +542,14 @@ class DocumentIntelligenceService:
             if raw_type.lower() in ("pipeline", "pipe line", "pipe", "piping", "pipework"):
                 raw_type = "Piping"
 
+            # Parse upstream/downstream equipment lists
+            upstream = item.get("upstream_equipment") or []
+            downstream = item.get("downstream_equipment") or []
+            if isinstance(upstream, str):
+                upstream = [t.strip() for t in upstream.split(",") if t.strip()]
+            if isinstance(downstream, str):
+                downstream = [t.strip() for t in downstream.split(",") if t.strip()]
+
             equipment_list.append(Equipment(
                 tag=tag,
                 name=item.get("name") or tag,
@@ -550,6 +558,8 @@ class DocumentIntelligenceService:
                 design_temperature=_safe_float(item.get("design_temperature")),
                 operating_pressure=_safe_float(item.get("operating_pressure")),
                 operating_temperature=_safe_float(item.get("operating_temperature")),
+                upstream_equipment=[t.strip().upper() for t in upstream if t],
+                downstream_equipment=[t.strip().upper() for t in downstream if t],
             ))
 
         return equipment_list
@@ -565,11 +575,26 @@ class DocumentIntelligenceService:
                 continue
             seen_tags.add(tag)
 
+            # Parse instrument_role — normalize to "cause" or "safeguard"
+            raw_role = (item.get("instrument_role") or "").strip().lower()
+            instrument_role = raw_role if raw_role in ("cause", "safeguard") else None
+
+            # Parse position — normalize to "upstream" or "downstream"
+            raw_position = (item.get("position") or "").strip().lower()
+            position = raw_position if raw_position in ("upstream", "downstream") else None
+
+            # Parse line_phase — normalize to "gas" or "liquid"
+            raw_phase = (item.get("line_phase") or "").strip().lower()
+            line_phase = raw_phase if raw_phase in ("gas", "liquid") else None
+
             instrument_list.append(Instrument(
                 tag=tag,
                 instrument_type=item.get("instrument_type") or "Other",
                 setpoint=_safe_float(item.get("setpoint")),
                 associated_equipment_tag=item.get("associated_equipment_tag"),
+                instrument_role=instrument_role,
+                position=position,
+                line_phase=line_phase,
             ))
 
         return instrument_list

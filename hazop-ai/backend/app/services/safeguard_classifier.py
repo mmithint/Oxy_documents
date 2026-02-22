@@ -37,6 +37,10 @@ def match_safeguards_to_equipment(
         if instrument.tag in seen_tags:
             continue
 
+        # Skip instruments explicitly classified as cause instruments (control valves)
+        if instrument.instrument_role == "cause":
+            continue
+
         matched_flag = False
 
         # Rule 1: Explicit association
@@ -61,6 +65,8 @@ def match_safeguards_to_equipment(
                 "tag": instrument.tag,
                 "instrument_type": instrument.instrument_type,
                 "pid_reference": instrument.pid_reference,
+                "position": instrument.position,
+                "line_phase": instrument.line_phase,
             })
             seen_tags.add(instrument.tag)
 

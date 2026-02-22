@@ -58,6 +58,10 @@ function getTagPrefix(tag: string): string {
 }
 
 function classifyInstrumentForCauses(inst: Instrument, bdvInNode: boolean): "include" | "exclude" {
+  // Primary: use instrument_role if set by P&ID extraction
+  if (inst.instrument_role === "cause") return "include";
+  if (inst.instrument_role === "safeguard") return "exclude";
+  // Fallback: prefix-based logic
   const prefix = getTagPrefix(inst.tag);
   // Control valves always included
   if (CAUSE_INCLUDE_PREFIXES.has(prefix)) return "include";
@@ -70,6 +74,10 @@ function classifyInstrumentForCauses(inst: Instrument, bdvInNode: boolean): "inc
 }
 
 function classifyInstrumentForSafeguards(inst: Instrument): "include" | "exclude" {
+  // Primary: use instrument_role if set by P&ID extraction
+  if (inst.instrument_role === "safeguard") return "include";
+  if (inst.instrument_role === "cause") return "exclude";
+  // Fallback: prefix-based logic
   const prefix = getTagPrefix(inst.tag);
   if (SAFEGUARD_INCLUDE_PREFIXES.has(prefix)) return "include";
   // Check for specific prefixes by startsWith (for compound prefixes like PSHH matching PSH)
@@ -89,6 +97,19 @@ function classifyInstrumentForSafeguards(inst: Instrument): "include" | "exclude
 
 function getRationale(inst: Instrument, classification: "include" | "exclude", context: "cause" | "safeguard", bdvInNode: boolean): string {
   const prefix = getTagPrefix(inst.tag);
+  // Primary: role-based rationale when instrument_role is set by P&ID extraction
+  if (inst.instrument_role === "cause" && context === "cause") {
+    return "Control valve — role assigned by P&ID extraction";
+  }
+  if (inst.instrument_role === "safeguard" && context === "safeguard") {
+    return "Safety device — role assigned by P&ID extraction";
+  }
+  if (inst.instrument_role === "cause" && context === "safeguard") {
+    return "Control valve — not a safeguard (role assigned by P&ID extraction)";
+  }
+  if (inst.instrument_role === "safeguard" && context === "cause") {
+    return "Safeguard device — not a root cause (role assigned by P&ID extraction)";
+  }
   if (context === "cause") {
     if (CAUSE_INCLUDE_PREFIXES.has(prefix) || inst.instrument_type.toLowerCase().includes("control valve")) {
       return "Control valve — failure (open/closed) can directly cause a deviation";

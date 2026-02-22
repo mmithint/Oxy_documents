@@ -82,29 +82,18 @@ class OpenAIService:
 
 Your task is to extract ALL equipment and instruments from the OCR text. The text may be noisy due to OCR quality — use your engineering knowledge to interpret tags and names.
 
-IMPORTANT: You are NOT limited to a fixed list of types. Extract every device you find
-and provide its full descriptive type name based on ISA/industry standards.
+HAZOP EXTRACTION RULES:
+- INCLUDE Major Equipment: vessels, pumps, compressors, exchangers, headers, scrubbers, knockout drums, tanks, separators, flares, columns
+- INCLUDE Instruments (Cause, instrument_role="cause"): control/shutdown valves ONLY — FSV, LCV, PCV, XCV, MOV, SDV, FCV, HCV, XV, FV, HV
+- INCLUDE Safety Devices (Safeguard, instrument_role="safeguard"): PSV, PSHH, PSH, PSLL, PSL, LSHH, LSH, LSLL, LSL, VSHH, interlocks, ESD/SDV trip devices, BDV
+- EXCLUDE: transmitters (PT, TT, LT, FT, DPT, AT, WT), indicators (PI, TI, LI, FI, PDI), controllers (PIC, TIC, LIC, FIC), alarms (PAH, TAH, LAH, FAH, PAHH, TAHH, LAHH, etc.)
+- EXCLUDE: internal equipment details (baffles, internals, nozzles)
+- Include vessel number in equipment name (e.g., "MBD-1010 HP Oil Production Separator No. 1")
 
-Common equipment examples (NOT exhaustive — use whatever fits):
-  Separator, Header, Compressor, Pump, Heat Exchanger, Vessel, Tank, Scrubber,
-  Knockout Drum, Flare, Column, Reactor, Filter, Mixer, Piping, etc.
-
-IMPORTANT: Use "Piping" (not "Pipeline" or "pipe") for any pipeline, piping segment,
-or flow line identified on the drawing.
-
-Common instrument examples (NOT exhaustive — use whatever fits):
-  Pressure Switch High High, Pressure Safety Valve, Pressure Control Valve,
-  Pressure Transmitter, Pressure Indicator, Pressure Differential Indicator,
-  Level Switch High High, Level Switch Low Low, Level Control Valve,
-  Level Transmitter, Level Gauge, Level Indicator,
-  Temperature Switch High High, Temperature Transmitter, Temperature Indicator,
-  Flow Safety Valve, Flow Control Valve, Flow Transmitter,
-  Gas Detector, Fire Detector, Deluge System, Emergency Shutdown Valve,
-  Blowdown Valve, Control Valve, Solenoid Valve, Check Valve, etc.
-
-If you see a tag you don't recognize, still include it with the best descriptive
-type name you can determine from context or ISA designation. Use "Other" only as
-a last resort.
+For each instrument, determine:
+  - instrument_role: "cause" for control/shutdown valves (FSV/LCV/PCV/XCV/MOV/SDV/FCV/HCV/XV); "safeguard" for safety devices (PSV/PSHH/PSLL/LSHH/LSLL/VSHH/interlocks/ESD)
+  - position: "upstream" or "downstream" relative to the associated equipment (based on piping flow direction)
+  - line_phase: "gas" or "liquid" (from piping notation, fluid description, or context)
 
 Return JSON in this exact format:
 {
@@ -146,18 +135,32 @@ Return JSON in this exact format:
     "equipment": [
         {
             "tag": "V-1210",
-            "name": "HP Oil Production Separator No. 2",
+            "name": "V-1210 HP Oil Production Separator No. 2",
             "equipment_type": "Separator",
             "design_pressure": 450.0,
             "design_temperature": 200.0,
             "operating_pressure": 350.0,
-            "operating_temperature": 150.0
+            "operating_temperature": 150.0,
+            "upstream_equipment": ["E-1010", "HDR-1000"],
+            "downstream_equipment": ["P-1210", "C-1210"]
         }
     ],
     "instruments": [
         {
+            "tag": "FSV-1210",
+            "instrument_type": "Flow Safety Valve",
+            "instrument_role": "cause",
+            "position": "upstream",
+            "line_phase": "gas",
+            "setpoint": null,
+            "associated_equipment_tag": "V-1210"
+        },
+        {
             "tag": "PSHH-1210",
             "instrument_type": "Pressure Switch High High",
+            "instrument_role": "safeguard",
+            "position": "downstream",
+            "line_phase": "gas",
             "setpoint": 440.0,
             "associated_equipment_tag": "V-1210"
         }
@@ -165,7 +168,7 @@ Return JSON in this exact format:
 }
 
 Rules:
-- Extract EVERY equipment tag and instrument tag you can find — do not skip any
+- Extract ONLY equipment and instruments per HAZOP EXTRACTION RULES above — exclude transmitters, indicators, controllers, alarms
 - Use null for numeric values you cannot determine from the text
 - Associate instruments with equipment using shared numeric suffixes (e.g., PSHH-1210 → V-1210)
 - Do NOT invent tags that aren't in the text
@@ -176,7 +179,12 @@ Rules:
 - For flow_description: trace the full process path — inlet, processing steps through each vessel, and outlet destinations. Be specific about fluid phases (oil/gas/water) and routing.
 - For line_connectivity: identify pipe connections between equipment using piping notation in the text. Each entry needs from_tag and to_tag. Include line_id if a line number is visible.
 - For control_loops: identify control loops from instrument tags. A loop typically has a transmitter (LT/PT/FT/TT), a controller (LIC/PIC/FIC/TIC), and a control valve (LCV/PCV/FCV/TCV). Each loop must have final_element and controlled_equipment.
-- For deviation_locations: for each piece of equipment, list which standard HAZOP deviation types apply. Use: "High Pressure", "Low Pressure", "High Level", "Low Level", "High Temperature", "Low Temperature", "No/Low Flow", "More/High Flow", "Reverse / Misdirected Flow"."""
+- For deviation_locations: for each piece of equipment, list which standard HAZOP deviation types apply. Use: "High Pressure", "Low Pressure", "High Level", "Low Level", "High Temperature", "Low Temperature", "No/Low Flow", "More/High Flow", "Reverse / Misdirected Flow".
+- For instrument instrument_role: "cause" for FSV/LCV/PCV/XCV/MOV/SDV/FCV/HCV/XV/FV/HV valves; "safeguard" for PSV/PSHH/PSLL/LSHH/LSLL/VSHH/BDV/interlocks/ESD devices
+- For instrument position: "upstream" if on inlet/feed side, "downstream" if on outlet/discharge side of associated equipment
+- For instrument line_phase: "gas" or "liquid" based on piping notation, fluid type, or equipment context
+- For equipment upstream_equipment: list tags of equipment directly feeding into this item via main process lines
+- For equipment downstream_equipment: list tags of equipment this item feeds into via main process lines"""
 
         user_prompt = f"""Extract all equipment and instruments from this P&ID OCR text.
 
@@ -270,12 +278,18 @@ HOW TO USE THE DATA:
    named "TITLEBLOCK", "TITLE", "BORDER", "FRAME", or similar, or for text matching
    patterns like "APC No.", "DWG No.", "Drawing No.", followed by alphanumerics.
 
+HAZOP EXTRACTION RULES:
+- INCLUDE Major Equipment: vessels, pumps, compressors, exchangers, headers, scrubbers, knockout drums, tanks, separators, flares, columns
+- INCLUDE Instruments (Cause, instrument_role="cause"): control/shutdown valves ONLY — FSV, LCV, PCV, XCV, MOV, SDV, FCV, HCV, XV, FV, HV
+- INCLUDE Safety Devices (Safeguard, instrument_role="safeguard"): PSV, PSHH, PSH, PSLL, PSL, LSHH, LSH, LSLL, LSL, VSHH, interlocks, ESD/SDV trip devices, BDV
+- EXCLUDE: transmitters (PT, TT, LT, FT, DPT, AT, WT), indicators (PI, TI, LI, FI, PDI), controllers (PIC, TIC, LIC, FIC), alarms (PAH, TAH, LAH, FAH, etc.)
+- Include vessel number in equipment name (e.g., "V-1210 HP Oil Production Separator No. 2")
+
 IMPORTANT:
 - Do NOT invent tags. Only report text strings that actually appear in the entity list.
 - Exact text means exact — "V-1210" in the DXF is "V-1210", not "V-l210" or "V 1210".
 - Non-tag text (pipe specs, notes, dimensions, revision marks, title text) should be
   ignored — focus only on equipment and instrument tags.
-- Use "Piping" (not "Pipeline") for any pipeline or flow line.
 
 Return JSON in this exact format:
 {
@@ -317,18 +331,32 @@ Return JSON in this exact format:
     "equipment": [
         {
             "tag": "V-1210",
-            "name": "HP Oil Production Separator No. 2",
+            "name": "V-1210 HP Oil Production Separator No. 2",
             "equipment_type": "Separator",
             "design_pressure": null,
             "design_temperature": null,
             "operating_pressure": null,
-            "operating_temperature": null
+            "operating_temperature": null,
+            "upstream_equipment": ["HDR-1000"],
+            "downstream_equipment": ["P-1210", "C-1210"]
         }
     ],
     "instruments": [
         {
+            "tag": "FSV-1210",
+            "instrument_type": "Flow Safety Valve",
+            "instrument_role": "cause",
+            "position": "upstream",
+            "line_phase": "gas",
+            "setpoint": null,
+            "associated_equipment_tag": "V-1210"
+        },
+        {
             "tag": "PSHH-1210",
             "instrument_type": "Pressure Switch High High",
+            "instrument_role": "safeguard",
+            "position": "downstream",
+            "line_phase": "gas",
             "setpoint": null,
             "associated_equipment_tag": "V-1210"
         }
@@ -336,17 +364,20 @@ Return JSON in this exact format:
 }
 
 Rules:
-- Extract EVERY equipment tag and instrument tag present in the entity list
-- Use null for numeric values (design_pressure, setpoint, etc.) — they are rarely
-  in the text entities; the SME will fill them in during review
-- Do NOT skip tags — if you see a tag pattern, include it
+- Extract ONLY equipment and instruments per HAZOP EXTRACTION RULES above — exclude transmitters, indicators, controllers, alarms
+- Use null for numeric values (design_pressure, setpoint, etc.) — they are rarely in the text entities; the SME will fill them in during review
+- Do NOT skip tags that match HAZOP EXTRACTION RULES
 - associated_equipment_tag: use shared numeric suffix or spatial proximity
 - drawing_number: extract from title-block entities if identifiable, else null
 - For pid_summary: describe the overall purpose of this P&ID based on the tags and any descriptive text you see.
 - For flow_description: infer the process flow from equipment tag names, types, and any piping notation in the text entities.
 - For line_connectivity: infer connections from equipment tag names (e.g., separator outlet → pump inlet) and any piping notation visible. Use null for line_id/pipe_size if not in the data.
 - For control_loops: identify loops from transmitter (LT/PT/FT/TT), controller (LIC/PIC/FIC/TIC), control valve (LCV/PCV/FCV/TCV) tag groupings using shared numeric suffixes.
-- For deviation_locations: for each equipment, list applicable standard deviation types: "High Pressure", "Low Pressure", "High Level", "Low Level", "High Temperature", "Low Temperature", "No/Low Flow", "More/High Flow", "Reverse / Misdirected Flow"."""
+- For deviation_locations: for each equipment, list applicable standard deviation types: "High Pressure", "Low Pressure", "High Level", "Low Level", "High Temperature", "Low Temperature", "No/Low Flow", "More/High Flow", "Reverse / Misdirected Flow".
+- For instrument instrument_role: "cause" for FSV/LCV/PCV/XCV/MOV/SDV/FCV/HCV/XV/FV/HV valves; "safeguard" for PSV/PSHH/PSLL/LSHH/LSLL/VSHH/BDV/interlocks/ESD devices
+- For instrument position: "upstream" if on inlet/feed side, "downstream" if on outlet/discharge side of associated equipment; infer from spatial proximity and tag naming
+- For instrument line_phase: "gas" or "liquid" based on equipment type, tag context, or spatial position
+- For equipment upstream_equipment/downstream_equipment: infer from equipment tag types and process flow direction (e.g., header → separator → pump)"""
 
         user_prompt = f"""Extract all equipment and instrument tags from this DXF entity data.
 
@@ -424,14 +455,18 @@ P&ID drawings use standard ISA symbols:
   - DIAMONDS = Computer/logic functions
   - Lines with instrument connections show which instrument monitors which equipment
 
+HAZOP EXTRACTION RULES (apply to what you see in the image):
+  - INCLUDE Major Equipment: vessels, pumps, compressors, exchangers, headers, scrubbers, knockout drums, tanks, separators, flares, columns
+  - INCLUDE Instruments (Cause, instrument_role="cause"): control/shutdown valves ONLY — FSV, LCV, PCV, XCV, MOV, SDV, FCV, HCV, XV, FV, HV (circles with these prefixes)
+  - INCLUDE Safety Devices (Safeguard, instrument_role="safeguard"): PSV, PSHH, PSH, PSLL, PSL, LSHH, LSH, LSLL, LSL, VSHH, interlocks, ESD/SDV trip devices, BDV
+  - EXCLUDE: transmitters (PT, TT, LT, FT, DPT, AT), indicators (PI, TI, LI, FI), controllers (PIC, TIC, LIC, FIC), alarms (PAH, TAH, LAH, FAH, etc.)
+  - Include vessel number in equipment name (e.g., "V-1210 HP Oil Production Separator No. 2")
+
 IMPORTANT:
-  - Read EVERY tag you see, even if partially visible or small
+  - Read EVERY qualifying tag you see, even if partially visible or small
   - Tags inside circles are instruments — read the letters and numbers carefully
   - Tags inside or near boxes/vessels are equipment
-  - You are NOT limited to a fixed list of types — use ISA standard naming
-  - Pay special attention to: Level Gauges (LG), Level Transmitters (LT),
-    Pressure Indicators (PI), Temperature Indicators (TI), and other commonly
-    missed instruments that appear as small circles on the diagram
+  - Only include instruments that match HAZOP EXTRACTION RULES above
 
 Return JSON in this exact format:
 {
@@ -469,18 +504,32 @@ Return JSON in this exact format:
     "equipment": [
         {
             "tag": "V-1210",
-            "name": "HP Oil Production Separator",
+            "name": "V-1210 HP Oil Production Separator",
             "equipment_type": "Separator",
             "design_pressure": null,
             "design_temperature": null,
             "operating_pressure": null,
-            "operating_temperature": null
+            "operating_temperature": null,
+            "upstream_equipment": ["HDR-1000"],
+            "downstream_equipment": ["P-1210", "C-1210"]
         }
     ],
     "instruments": [
         {
+            "tag": "FSV-1210",
+            "instrument_type": "Flow Safety Valve",
+            "instrument_role": "cause",
+            "position": "upstream",
+            "line_phase": "gas",
+            "setpoint": null,
+            "associated_equipment_tag": "V-1210"
+        },
+        {
             "tag": "PSHH-1210",
             "instrument_type": "Pressure Switch High High",
+            "instrument_role": "safeguard",
+            "position": "downstream",
+            "line_phase": "gas",
             "setpoint": null,
             "associated_equipment_tag": "V-1210"
         }
@@ -488,7 +537,7 @@ Return JSON in this exact format:
 }
 
 Rules:
-- Extract EVERY tag visible in the image — do not skip any
+- Extract ONLY tags visible in the image that match the HAZOP EXTRACTION RULES
 - Associate instruments with their connected equipment using visual connections or shared numeric suffixes
 - Use null for values you cannot read from the image
 - Do NOT invent tags — only report what you actually see
@@ -497,7 +546,11 @@ Rules:
 - For flow_description: follow the piping arrows and describe the full flow path from inlet to outlet, naming each vessel and the fluid type at each stage.
 - For line_connectivity: follow the piping lines (arrowed pipes) on the diagram. For each visible pipe connection between two identifiable tags, record from_tag → to_tag, the line_id label if shown, the fluid phase (gas/liquid/two-phase as visible from notes or symbols), and a short description. Only include connections where both from_tag and to_tag are visible.
 - For control_loops: identify ISA control loop bubbles. For each loop, find the measuring element (LT/PT/FT/TT-xxx), the controller bubble (LIC/PIC/FIC/TIC-xxx), and the final control element (LCV/PCV/FCV/TCV-xxx). Note the controlled equipment and the controlled variable (Level, Pressure, Flow, Temperature).
-- For deviation_locations: for each piece of equipment, identify which HAZOP deviation types apply based on the visible instruments, fluid types, and equipment function. Use standard names: "High Pressure", "Low Pressure", "High Level", "Low Level", "High Temperature", "Low Temperature", "No/Low Flow", "More/High Flow", "Reverse / Misdirected Flow"."""
+- For deviation_locations: for each piece of equipment, identify which HAZOP deviation types apply based on the visible instruments, fluid types, and equipment function. Use standard names: "High Pressure", "Low Pressure", "High Level", "Low Level", "High Temperature", "Low Temperature", "No/Low Flow", "More/High Flow", "Reverse / Misdirected Flow".
+- For instrument instrument_role: "cause" for FSV/LCV/PCV/XCV/MOV/SDV/FCV/HCV/XV visible as valve symbols; "safeguard" for PSV/PSHH/PSLL/LSHH/LSLL/VSHH/BDV/interlock symbols
+- For instrument position: "upstream" if visually on inlet/feed side of equipment, "downstream" if on outlet/discharge side
+- For instrument line_phase: "gas" if on gas line (upper connections), "liquid" if on liquid line (lower connections) — infer from visual position and piping labels
+- For equipment upstream_equipment/downstream_equipment: read the piping arrows to determine which equipment feeds into (upstream) and receives from (downstream) each major piece of equipment"""
 
         # Build message content with images
         content: list[dict] = []
@@ -821,6 +874,10 @@ OVERPRESSURE CALCULATION:
                 itype = inst.get("instrument_type", "")
                 pid_ref = inst.get("pid_reference", "")
                 line = f"  - {tag} ({itype})"
+                if inst.get("position"):
+                    line += f", {inst['position']}"
+                if inst.get("line_phase"):
+                    line += f", {inst['line_phase']} line"
                 if pid_ref:
                     line += f" [P&ID: {pid_ref}]"
                 prompt += line + "\n"
@@ -1352,6 +1409,10 @@ Deviation: {deviation}
                 setpoint = inst.get("setpoint")
                 assoc = inst.get("associated_equipment_tag", "")
                 line = f"  - {tag} ({itype})"
+                if inst.get("position"):
+                    line += f", {inst['position']} of equipment"
+                if inst.get("line_phase"):
+                    line += f", {inst['line_phase']} line"
                 if setpoint is not None:
                     line += f", setpoint: {setpoint}"
                 if assoc:

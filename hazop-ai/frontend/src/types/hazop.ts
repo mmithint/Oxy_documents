@@ -68,6 +68,8 @@ export interface Equipment {
   design_temperature: number | null;
   operating_pressure: number | null;
   operating_temperature: number | null;
+  upstream_equipment: string[];
+  downstream_equipment: string[];
 }
 
 export interface Instrument {
@@ -76,6 +78,9 @@ export interface Instrument {
   setpoint: number | null;
   associated_equipment_tag: string | null;
   pid_reference: string | null;
+  instrument_role: string | null;
+  position: string | null;
+  line_phase: string | null;
 }
 
 export interface LineConnection {

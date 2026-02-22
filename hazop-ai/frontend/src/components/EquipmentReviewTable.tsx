@@ -5,62 +5,27 @@ import { COMMON_EQUIPMENT_TYPES, COMMON_INSTRUMENT_TYPES } from "../types/hazop"
 import { validateEquipment } from "../services/api";
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Helpers — role-based classification (reads instrument_role from data)
 // ---------------------------------------------------------------------------
 
-/**
- * Extract the letter prefix from an instrument tag.
- * "PSHH-1210" → "PSHH",  "LT1210" → "LT"
- */
-function getTagPrefix(tag: string): string {
-  const m = tag.toUpperCase().match(/^([A-Z]+)/);
-  return m ? m[1] : tag.toUpperCase();
+function isCauseInstrument(inst: Instrument): boolean {
+  return inst.instrument_role === "cause";
 }
 
-const SAFETY_DEVICE_PREFIXES = new Set([
-  "PSH", "PSL", "PSHH", "PSLL",
-  "LSH", "LSL", "LSHH", "LSLL",
-  "TSH", "TSL", "TSHH", "TSLL",
-  "FSH", "FSL", "FSHH", "FSLL",
-  "PSV", "PRV", "SV", "RV",
-  "GD", "GDS", "FD",
-  "SDV", "ESV", "BDV", "XV",
-]);
-
-const SAFETY_TYPE_KEYWORDS = [
-  "safety valve", "switch high", "switch low",
-  "gas detector", "fire detector", "deluge",
-  "emergency shutdown", "shutdown valve", "blowdown valve",
-  "relief valve",
-];
-
-function isSafetyDevice(inst: Instrument): boolean {
-  const prefix = getTagPrefix(inst.tag);
-  if (SAFETY_DEVICE_PREFIXES.has(prefix)) return true;
-  const typeLower = inst.instrument_type.toLowerCase();
-  return SAFETY_TYPE_KEYWORDS.some((kw) => typeLower.includes(kw));
+function isSafeguard(inst: Instrument): boolean {
+  return inst.instrument_role === "safeguard";
 }
 
-const TRANSMITTER_PREFIXES = new Set([
-  "PT", "LT", "FT", "TT", "DPT", "AT", "WT", "FDT", "PDT", "PDPT",
-]);
-
-function isTransmitter(inst: Instrument): boolean {
-  const prefix = getTagPrefix(inst.tag);
-  if (TRANSMITTER_PREFIXES.has(prefix)) return true;
-  return inst.instrument_type.toLowerCase().includes("transmitter");
-}
-
-const TRANSMITTER_TYPES = COMMON_INSTRUMENT_TYPES.filter(
-  (t) => t.toLowerCase().includes("transmitter")
+// Instruments to show in tables: only cause + safeguard (excludes un-classified)
+const CAUSE_INSTRUMENT_TYPES = COMMON_INSTRUMENT_TYPES.filter((t) =>
+  ["Flow Safety Valve", "Flow Control Valve", "Level Control Valve",
+   "Pressure Control Valve", "Emergency Shutdown Valve", "Blowdown Valve",
+   "Control Valve"].some((k) => t.includes(k))
 );
-const INSTRUMENT_ONLY_TYPES = COMMON_INSTRUMENT_TYPES.filter(
-  (t) =>
-    !SAFETY_TYPE_KEYWORDS.some((kw) => t.toLowerCase().includes(kw)) &&
-    !t.toLowerCase().includes("transmitter")
-);
-const SAFETY_DEVICE_TYPES = COMMON_INSTRUMENT_TYPES.filter(
-  (t) => SAFETY_TYPE_KEYWORDS.some((kw) => t.toLowerCase().includes(kw))
+
+const SAFEGUARD_TYPES = COMMON_INSTRUMENT_TYPES.filter((t) =>
+  ["Pressure Switch", "Level Switch", "Pressure Safety Valve",
+   "Gas Detector", "Fire Detector", "Deluge"].some((k) => t.includes(k))
 );
 
 interface EquipmentReviewTableProps {
@@ -84,26 +49,27 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
   const [newEqName, setNewEqName] = useState("");
   const [newEqType, setNewEqType] = useState("");
   const [newEqPressure, setNewEqPressure] = useState("");
+  const [newEqUpstream, setNewEqUpstream] = useState("");
+  const [newEqDownstream, setNewEqDownstream] = useState("");
 
-  // Add instrument form state (process instruments)
-  const [showAddInstrument, setShowAddInstrument] = useState(false);
-  const [newInstTag, setNewInstTag] = useState("");
-  const [newInstType, setNewInstType] = useState("");
-  const [newInstAssocEquip, setNewInstAssocEquip] = useState("");
+  // Add cause instrument form state
+  const [showAddCause, setShowAddCause] = useState(false);
+  const [newCauseTag, setNewCauseTag] = useState("");
+  const [newCauseType, setNewCauseType] = useState("");
+  const [newCauseAssocEquip, setNewCauseAssocEquip] = useState("");
+  const [newCausePosition, setNewCausePosition] = useState("");
+  const [newCausePhase, setNewCausePhase] = useState("");
 
-  // Add safety device form state (separate section)
-  const [showAddSafetyDevice, setShowAddSafetyDevice] = useState(false);
-  const [newSdTag, setNewSdTag] = useState("");
-  const [newSdType, setNewSdType] = useState("");
-  const [newSdAssocEquip, setNewSdAssocEquip] = useState("");
+  // Add safety device form state
+  const [showAddSafeguard, setShowAddSafeguard] = useState(false);
+  const [newSgTag, setNewSgTag] = useState("");
+  const [newSgType, setNewSgType] = useState("");
+  const [newSgAssocEquip, setNewSgAssocEquip] = useState("");
+  const [newSgSetpoint, setNewSgSetpoint] = useState("");
+  const [newSgPosition, setNewSgPosition] = useState("");
+  const [newSgPhase, setNewSgPhase] = useState("");
 
-  // Add transmitter form state (separate section)
-  const [showAddTransmitter, setShowAddTransmitter] = useState(false);
-  const [newTrTag, setNewTrTag] = useState("");
-  const [newTrType, setNewTrType] = useState("");
-  const [newTrAssocEquip, setNewTrAssocEquip] = useState("");
-
-  // Edit state — tracks which row index is being edited (-1 = none)
+  // Edit state
   const [editingEqIndex, setEditingEqIndex] = useState(-1);
   const [editEq, setEditEq] = useState<Equipment | null>(null);
   const [editingInstIndex, setEditingInstIndex] = useState(-1);
@@ -121,6 +87,12 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
 
   const addEquipment = () => {
     if (!newEqTag.trim()) return;
+    const upstream = newEqUpstream.trim()
+      ? newEqUpstream.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean)
+      : [];
+    const downstream = newEqDownstream.trim()
+      ? newEqDownstream.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean)
+      : [];
     const newItem: Equipment = {
       tag: newEqTag.trim().toUpperCase(),
       name: newEqName.trim() || newEqTag.trim().toUpperCase(),
@@ -129,61 +101,49 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
       design_temperature: null,
       operating_pressure: null,
       operating_temperature: null,
+      upstream_equipment: upstream,
+      downstream_equipment: downstream,
     };
     setEquipment((prev) => [...prev, newItem]);
-    setNewEqTag("");
-    setNewEqName("");
-    setNewEqType("Other");
-    setNewEqPressure("");
+    setNewEqTag(""); setNewEqName(""); setNewEqType(""); setNewEqPressure("");
+    setNewEqUpstream(""); setNewEqDownstream("");
     setShowAddEquipment(false);
   };
 
-  const addInstrument = () => {
-    if (!newInstTag.trim()) return;
+  const addCauseInstrument = () => {
+    if (!newCauseTag.trim()) return;
     const newItem: Instrument = {
-      tag: newInstTag.trim().toUpperCase(),
-      instrument_type: newInstType.trim() || "Other",
+      tag: newCauseTag.trim().toUpperCase(),
+      instrument_type: newCauseType.trim() || "Other",
+      instrument_role: "cause",
+      position: newCausePosition || null,
+      line_phase: newCausePhase || null,
       setpoint: null,
-      associated_equipment_tag: newInstAssocEquip.trim() || null,
+      associated_equipment_tag: newCauseAssocEquip.trim() || null,
       pid_reference: null,
     };
     setInstruments((prev) => [...prev, newItem]);
-    setNewInstTag("");
-    setNewInstType("Other");
-    setNewInstAssocEquip("");
-    setShowAddInstrument(false);
+    setNewCauseTag(""); setNewCauseType(""); setNewCauseAssocEquip("");
+    setNewCausePosition(""); setNewCausePhase("");
+    setShowAddCause(false);
   };
 
-  const addSafetyDevice = () => {
-    if (!newSdTag.trim()) return;
+  const addSafeguard = () => {
+    if (!newSgTag.trim()) return;
     const newItem: Instrument = {
-      tag: newSdTag.trim().toUpperCase(),
-      instrument_type: newSdType.trim() || "Other",
-      setpoint: null,
-      associated_equipment_tag: newSdAssocEquip.trim() || null,
+      tag: newSgTag.trim().toUpperCase(),
+      instrument_type: newSgType.trim() || "Other",
+      instrument_role: "safeguard",
+      position: newSgPosition || null,
+      line_phase: newSgPhase || null,
+      setpoint: newSgSetpoint ? parseFloat(newSgSetpoint) : null,
+      associated_equipment_tag: newSgAssocEquip.trim() || null,
       pid_reference: null,
     };
     setInstruments((prev) => [...prev, newItem]);
-    setNewSdTag("");
-    setNewSdType("Other");
-    setNewSdAssocEquip("");
-    setShowAddSafetyDevice(false);
-  };
-
-  const addTransmitter = () => {
-    if (!newTrTag.trim()) return;
-    const newItem: Instrument = {
-      tag: newTrTag.trim().toUpperCase(),
-      instrument_type: newTrType.trim() || "Pressure Transmitter",
-      setpoint: null,
-      associated_equipment_tag: newTrAssocEquip.trim() || null,
-      pid_reference: null,
-    };
-    setInstruments((prev) => [...prev, newItem]);
-    setNewTrTag("");
-    setNewTrType("");
-    setNewTrAssocEquip("");
-    setShowAddTransmitter(false);
+    setNewSgTag(""); setNewSgType(""); setNewSgAssocEquip("");
+    setNewSgSetpoint(""); setNewSgPosition(""); setNewSgPhase("");
+    setShowAddSafeguard(false);
   };
 
   // --- Edit Equipment ---
@@ -235,7 +195,7 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
   // --- Download Excel ---
   const handleDownload = async () => {
     const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet("Equipment & Instruments");
+    const sheet = workbook.addWorksheet("P&ID HAZOP Data");
 
     const boldFont: Partial<ExcelJS.Font> = { bold: true, size: 11 };
     const sectionFont: Partial<ExcelJS.Font> = { bold: true, size: 12 };
@@ -247,147 +207,94 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
       top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder,
     };
 
-    // Column widths
     sheet.columns = [
       { width: 16 }, { width: 28 }, { width: 40 }, { width: 22 },
+      { width: 22 }, { width: 16 }, { width: 16 },
     ];
 
     let row = 1;
 
-    // --- Equipment Section ---
-    const eqTitle = sheet.getRow(row);
-    eqTitle.getCell(1).value = "EQUIPMENT";
-    eqTitle.getCell(1).font = sectionFont;
+    // --- Section 1: Major Equipment ---
+    sheet.getRow(row).getCell(1).value = "MAJOR EQUIPMENT";
+    sheet.getRow(row).getCell(1).font = sectionFont;
     row++;
 
-    const eqHeaders = ["Tag", "Type", "Name", "Design Pressure (PSIG)"];
+    const eqHeaders = ["Tag", "Type", "Name", "Design Pressure (PSIG)", "Upstream Equipment", "Downstream Equipment"];
     const eqHeaderRow = sheet.getRow(row);
     eqHeaders.forEach((h, ci) => {
       const cell = eqHeaderRow.getCell(ci + 1);
-      cell.value = h;
-      cell.font = boldFont;
-      cell.fill = headerFill;
-      cell.border = allBorders;
+      cell.value = h; cell.font = boldFont; cell.fill = headerFill; cell.border = allBorders;
     });
     row++;
 
     for (const eq of equipment) {
       const r = sheet.getRow(row);
-      [eq.tag, eq.equipment_type, eq.name, eq.design_pressure ?? ""].forEach((v, ci) => {
+      [eq.tag, eq.equipment_type, eq.name, eq.design_pressure ?? "",
+       (eq.upstream_equipment || []).join(", "),
+       (eq.downstream_equipment || []).join(", ")].forEach((v, ci) => {
         const cell = r.getCell(ci + 1);
-        cell.value = v;
-        cell.border = allBorders;
+        cell.value = v; cell.border = allBorders;
       });
       row++;
     }
-
-    row++; // blank separator
-
-    // --- Instruments / Transmitters / Safety Devices split ---
-    const processInstruments = instruments.filter((i) => !isSafetyDevice(i) && !isTransmitter(i));
-    const transmitters = instruments.filter(isTransmitter);
-    const safetyDevices = instruments.filter(isSafetyDevice);
-
-    const instTitle = sheet.getRow(row);
-    instTitle.getCell(1).value = "INSTRUMENTS";
-    instTitle.getCell(1).font = sectionFont;
+    if (equipment.length === 0) { sheet.getRow(row).getCell(1).value = "(none)"; row++; }
     row++;
 
-    const instHeaders = ["Tag", "Type", "Associated Equipment"];
-    const instHeaderRow = sheet.getRow(row);
-    instHeaders.forEach((h, ci) => {
-      const cell = instHeaderRow.getCell(ci + 1);
-      cell.value = h;
-      cell.font = boldFont;
-      cell.fill = headerFill;
-      cell.border = allBorders;
+    // --- Section 2: Instruments (Cause) ---
+    sheet.getRow(row).getCell(1).value = "INSTRUMENTS (CAUSE) — Control & Shutdown Valves";
+    sheet.getRow(row).getCell(1).font = sectionFont;
+    row++;
+
+    const causeHeaders = ["Tag", "Type", "Position", "Line Phase", "Associated Equipment"];
+    const causeHeaderRow = sheet.getRow(row);
+    causeHeaders.forEach((h, ci) => {
+      const cell = causeHeaderRow.getCell(ci + 1);
+      cell.value = h; cell.font = boldFont; cell.fill = headerFill; cell.border = allBorders;
     });
     row++;
 
-    for (const inst of processInstruments) {
+    const causes = instruments.filter(isCauseInstrument);
+    for (const inst of causes) {
       const r = sheet.getRow(row);
-      [inst.tag, inst.instrument_type, inst.associated_equipment_tag ?? ""].forEach((v, ci) => {
+      [inst.tag, inst.instrument_type, inst.position ?? "", inst.line_phase ?? "",
+       inst.associated_equipment_tag ?? ""].forEach((v, ci) => {
         const cell = r.getCell(ci + 1);
-        cell.value = v;
-        cell.border = allBorders;
+        cell.value = v; cell.border = allBorders;
       });
       row++;
     }
-    if (processInstruments.length === 0) {
-      sheet.getRow(row).getCell(1).value = "(none)";
-      row++;
-    }
-
-    row++; // blank separator
-
-    // --- Transmitters Section ---
-    const trTitle = sheet.getRow(row);
-    trTitle.getCell(1).value = "TRANSMITTERS";
-    trTitle.getCell(1).font = sectionFont;
+    if (causes.length === 0) { sheet.getRow(row).getCell(1).value = "(none)"; row++; }
     row++;
 
-    const trHeaderRow = sheet.getRow(row);
-    instHeaders.forEach((h, ci) => {
-      const cell = trHeaderRow.getCell(ci + 1);
-      cell.value = h;
-      cell.font = boldFont;
-      cell.fill = headerFill;
-      cell.border = allBorders;
+    // --- Section 3: Safety Devices / Mitigation ---
+    sheet.getRow(row).getCell(1).value = "SAFETY DEVICES / MITIGATION — PSV, PSHH, LSHH, Interlocks";
+    sheet.getRow(row).getCell(1).font = sectionFont;
+    row++;
+
+    const sgHeaders = ["Tag", "Type", "Setpoint", "Position", "Line Phase", "Associated Equipment"];
+    const sgHeaderRow = sheet.getRow(row);
+    sgHeaders.forEach((h, ci) => {
+      const cell = sgHeaderRow.getCell(ci + 1);
+      cell.value = h; cell.font = boldFont; cell.fill = headerFill; cell.border = allBorders;
     });
     row++;
 
-    for (const tr of transmitters) {
+    const safeguards = instruments.filter(isSafeguard);
+    for (const inst of safeguards) {
       const r = sheet.getRow(row);
-      [tr.tag, tr.instrument_type, tr.associated_equipment_tag ?? ""].forEach((v, ci) => {
+      [inst.tag, inst.instrument_type, inst.setpoint ?? "", inst.position ?? "",
+       inst.line_phase ?? "", inst.associated_equipment_tag ?? ""].forEach((v, ci) => {
         const cell = r.getCell(ci + 1);
-        cell.value = v;
-        cell.border = allBorders;
+        cell.value = v; cell.border = allBorders;
       });
       row++;
     }
-    if (transmitters.length === 0) {
-      sheet.getRow(row).getCell(1).value = "(none)";
-      row++;
-    }
-
-    row++; // blank separator
-
-    // --- Safety Devices Section ---
-    const sdTitle = sheet.getRow(row);
-    sdTitle.getCell(1).value = "SAFETY DEVICES";
-    sdTitle.getCell(1).font = sectionFont;
+    if (safeguards.length === 0) { sheet.getRow(row).getCell(1).value = "(none)"; row++; }
     row++;
-
-    const sdHeaderRow = sheet.getRow(row);
-    instHeaders.forEach((h, ci) => {
-      const cell = sdHeaderRow.getCell(ci + 1);
-      cell.value = h;
-      cell.font = boldFont;
-      cell.fill = headerFill;
-      cell.border = allBorders;
-    });
-    row++;
-
-    for (const sd of safetyDevices) {
-      const r = sheet.getRow(row);
-      [sd.tag, sd.instrument_type, sd.associated_equipment_tag ?? ""].forEach((v, ci) => {
-        const cell = r.getCell(ci + 1);
-        cell.value = v;
-        cell.border = allBorders;
-      });
-      row++;
-    }
-    if (safetyDevices.length === 0) {
-      sheet.getRow(row).getCell(1).value = "(none)";
-      row++;
-    }
-
-    row++; // blank separator
 
     // --- Node Info ---
-    const nodeTitle = sheet.getRow(row);
-    nodeTitle.getCell(1).value = "NODE INFO";
-    nodeTitle.getCell(1).font = sectionFont;
+    sheet.getRow(row).getCell(1).value = "NODE INFO";
+    sheet.getRow(row).getCell(1).font = sectionFont;
     row++;
 
     const nodeInfo: [string, string | number][] = [
@@ -400,13 +307,10 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
     }
     for (const [label, value] of nodeInfo) {
       const r = sheet.getRow(row);
-      r.getCell(1).value = label;
-      r.getCell(1).font = boldFont;
-      r.getCell(2).value = value;
+      r.getCell(1).value = label; r.getCell(1).font = boldFont; r.getCell(2).value = value;
       row++;
     }
 
-    // Generate and download
     const buffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([buffer], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -445,6 +349,14 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
     }
   };
 
+  const causeInstruments = instruments
+    .map((inst, globalIdx) => ({ inst, globalIdx }))
+    .filter(({ inst }) => isCauseInstrument(inst));
+
+  const safeguardInstruments = instruments
+    .map((inst, globalIdx) => ({ inst, globalIdx }))
+    .filter(({ inst }) => isSafeguard(inst));
+
   return (
     <div className="bg-white rounded-lg border border-gray-200">
       <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
@@ -469,34 +381,37 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
         </button>
       </div>
 
-      {/* P&ID Summary — shown if AI extracted a summary and/or flow description */}
+      {/* P&ID Summary */}
       {(node.pid_summary || node.flow_description) && (
         <div className="px-4 py-3 bg-blue-50/50 border-b border-blue-100 space-y-2">
           {node.pid_summary && (
             <div>
-              <span className="text-[10px] font-semibold text-blue-700 uppercase tracking-wide">
-                P&ID Overview
-              </span>
+              <span className="text-[10px] font-semibold text-blue-700 uppercase tracking-wide">P&ID Overview</span>
               <p className="text-xs text-gray-700 mt-0.5">{node.pid_summary}</p>
             </div>
           )}
           {node.flow_description && (
             <div>
-              <span className="text-[10px] font-semibold text-blue-700 uppercase tracking-wide">
-                Process Flow
-              </span>
+              <span className="text-[10px] font-semibold text-blue-700 uppercase tracking-wide">Process Flow</span>
               <p className="text-xs text-gray-700 mt-0.5">{node.flow_description}</p>
             </div>
           )}
         </div>
       )}
 
-      {/* Equipment Table */}
+      {/* ========================================================
+          SECTION 1 — MAJOR EQUIPMENT
+          ======================================================== */}
       <div className="px-4 py-3">
         <div className="flex items-center justify-between mb-2">
-          <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
-            Equipment ({equipment.length})
-          </h4>
+          <div>
+            <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+              1. Major Equipment ({equipment.length})
+            </h4>
+            <p className="text-[11px] text-gray-400 mt-0.5">
+              Vessels, pumps, compressors, exchangers, headers, scrubbers.
+            </p>
+          </div>
           <button
             onClick={() => setShowAddEquipment(!showAddEquipment)}
             className="text-xs font-medium text-blue-600 hover:text-blue-800"
@@ -508,11 +423,13 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
           <table className="min-w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100">
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Tag</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Type</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Name</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Design P (PSIG)</th>
-                <th className="text-right py-2 font-medium text-gray-600">Action</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Tag</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Type</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Name</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Design P (PSIG)</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Upstream</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Downstream</th>
+                <th className="text-right py-2 font-medium text-gray-600 text-xs">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -520,81 +437,70 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
                 editingEqIndex === i && editEq ? (
                   <tr key={`edit-${i}`} className="border-b border-amber-100 bg-amber-50/30">
                     <td className="py-2 pr-2">
-                      <input
-                        type="text"
-                        value={editEq.tag}
+                      <input type="text" value={editEq.tag}
                         onChange={(e) => setEditEq({ ...editEq, tag: e.target.value })}
-                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono"
-                      />
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
                     </td>
                     <td className="py-2 pr-2">
-                      <input
-                        type="text"
-                        list="eq-types"
-                        value={editEq.equipment_type}
+                      <input type="text" list="eq-types" value={editEq.equipment_type}
                         onChange={(e) => setEditEq({ ...editEq, equipment_type: e.target.value })}
-                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                        placeholder="Type or select"
-                      />
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded" placeholder="Type" />
                     </td>
                     <td className="py-2 pr-2">
-                      <input
-                        type="text"
-                        value={editEq.name}
+                      <input type="text" value={editEq.name}
                         onChange={(e) => setEditEq({ ...editEq, name: e.target.value })}
-                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                      />
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
                     </td>
                     <td className="py-2 pr-2">
-                      <input
-                        type="number"
-                        value={editEq.design_pressure ?? ""}
+                      <input type="number" value={editEq.design_pressure ?? ""}
                         onChange={(e) => setEditEq({ ...editEq, design_pressure: e.target.value ? parseFloat(e.target.value) : null })}
-                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                      />
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input type="text" value={(editEq.upstream_equipment || []).join(", ")}
+                        onChange={(e) => setEditEq({ ...editEq, upstream_equipment: e.target.value.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean) })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono"
+                        placeholder="e.g. E-1010, HDR-1000" />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input type="text" value={(editEq.downstream_equipment || []).join(", ")}
+                        onChange={(e) => setEditEq({ ...editEq, downstream_equipment: e.target.value.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean) })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono"
+                        placeholder="e.g. P-1010, C-1010" />
                     </td>
                     <td className="py-2 text-right">
                       <div className="flex items-center justify-end gap-2">
-                        <button
-                          onClick={saveEditEquipment}
-                          disabled={!editEq.tag.trim()}
-                          className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400"
-                        >
-                          Save
-                        </button>
-                        <button
-                          onClick={cancelEditEquipment}
-                          className="text-xs text-gray-500 hover:text-gray-700"
-                        >
-                          Cancel
-                        </button>
+                        <button onClick={saveEditEquipment} disabled={!editEq.tag.trim()}
+                          className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
+                        <button onClick={cancelEditEquipment}
+                          className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
                       </div>
                     </td>
                   </tr>
                 ) : (
                   <tr key={eq.tag} className="border-b border-gray-50">
-                    <td className="py-2 pr-4 font-mono text-xs">{eq.tag}</td>
-                    <td className="py-2 pr-4">
-                      <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs">
-                        {eq.equipment_type}
-                      </span>
+                    <td className="py-2 pr-3 font-mono text-xs">{eq.tag}</td>
+                    <td className="py-2 pr-3">
+                      <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs">{eq.equipment_type}</span>
                     </td>
-                    <td className="py-2 pr-4 text-gray-700">{eq.name}</td>
-                    <td className="py-2 pr-4 text-gray-500">{eq.design_pressure ?? "—"}</td>
+                    <td className="py-2 pr-3 text-gray-700 text-xs">{eq.name}</td>
+                    <td className="py-2 pr-3 text-gray-500 text-xs">{eq.design_pressure ?? "—"}</td>
+                    <td className="py-2 pr-3 text-gray-500 text-xs font-mono">
+                      {(eq.upstream_equipment || []).length > 0
+                        ? (eq.upstream_equipment || []).join(", ")
+                        : <span className="text-gray-300">—</span>}
+                    </td>
+                    <td className="py-2 pr-3 text-gray-500 text-xs font-mono">
+                      {(eq.downstream_equipment || []).length > 0
+                        ? (eq.downstream_equipment || []).join(", ")
+                        : <span className="text-gray-300">—</span>}
+                    </td>
                     <td className="py-2 text-right">
                       <div className="flex items-center justify-end gap-2">
-                        <button
-                          onClick={() => startEditEquipment(i)}
-                          className="text-xs text-amber-600 hover:text-amber-800"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => removeEquipment(i)}
-                          className="text-xs text-red-600 hover:text-red-800"
-                        >
-                          Remove
-                        </button>
+                        <button onClick={() => startEditEquipment(i)}
+                          className="text-xs text-amber-600 hover:text-amber-800">Edit</button>
+                        <button onClick={() => removeEquipment(i)}
+                          className="text-xs text-red-600 hover:text-red-800">Remove</button>
                       </div>
                     </td>
                   </tr>
@@ -604,58 +510,45 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
               {showAddEquipment && (
                 <tr className="border-b border-blue-100 bg-blue-50/30">
                   <td className="py-2 pr-2">
-                    <input
-                      type="text"
-                      placeholder="e.g. V-1210"
-                      value={newEqTag}
+                    <input type="text" placeholder="e.g. V-1210" value={newEqTag}
                       onChange={(e) => setNewEqTag(e.target.value)}
-                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono"
-                    />
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
                   </td>
                   <td className="py-2 pr-2">
-                    <input
-                      type="text"
-                      list="eq-types"
-                      value={newEqType}
+                    <input type="text" list="eq-types" value={newEqType}
                       onChange={(e) => setNewEqType(e.target.value)}
                       className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                      placeholder="Type or select"
-                    />
+                      placeholder="Type or select" />
                   </td>
                   <td className="py-2 pr-2">
-                    <input
-                      type="text"
-                      placeholder="Equipment name"
-                      value={newEqName}
+                    <input type="text" placeholder="Equipment name" value={newEqName}
                       onChange={(e) => setNewEqName(e.target.value)}
-                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                    />
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
                   </td>
                   <td className="py-2 pr-2">
-                    <input
-                      type="number"
-                      placeholder="PSIG"
-                      value={newEqPressure}
+                    <input type="number" placeholder="PSIG" value={newEqPressure}
                       onChange={(e) => setNewEqPressure(e.target.value)}
-                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                    />
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
+                  </td>
+                  <td className="py-2 pr-2">
+                    <input type="text" placeholder="e.g. HDR-1000" value={newEqUpstream}
+                      onChange={(e) => setNewEqUpstream(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                  </td>
+                  <td className="py-2 pr-2">
+                    <input type="text" placeholder="e.g. P-1010" value={newEqDownstream}
+                      onChange={(e) => setNewEqDownstream(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
                   </td>
                   <td className="py-2 text-right">
-                    <button
-                      onClick={addEquipment}
-                      disabled={!newEqTag.trim()}
-                      className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400"
-                    >
-                      Add
-                    </button>
+                    <button onClick={addEquipment} disabled={!newEqTag.trim()}
+                      className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Add</button>
                   </td>
                 </tr>
               )}
               {equipment.length === 0 && !showAddEquipment && (
                 <tr>
-                  <td colSpan={5} className="py-4 text-center text-gray-400 text-xs">
-                    No equipment detected
-                  </td>
+                  <td colSpan={7} className="py-4 text-center text-gray-400 text-xs">No equipment detected</td>
                 </tr>
               )}
             </tbody>
@@ -663,110 +556,150 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
         </div>
       </div>
 
-      {/* ---- Instruments Table (control valves, indicators, gauges — NOT transmitters) ---- */}
+      {/* ========================================================
+          SECTION 2 — INSTRUMENTS (CAUSE)
+          ======================================================== */}
       <div className="px-4 py-3 border-t border-gray-100">
-        <div className="flex items-center justify-between mb-2">
-          <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
-            Instruments ({instruments.filter((i) => !isSafetyDevice(i) && !isTransmitter(i)).length})
-          </h4>
+        <div className="flex items-center justify-between mb-1">
+          <div>
+            <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+              2. Instruments (Cause) ({causeInstruments.length})
+            </h4>
+            <p className="text-[11px] text-gray-400 mt-0.5">
+              Control & shutdown valves whose failure can cause deviations — FSV, LCV, PCV, XCV, MOV, SDV, FCV, HCV.
+            </p>
+          </div>
           <button
-            onClick={() => { setShowAddInstrument(!showAddInstrument); setShowAddSafetyDevice(false); setShowAddTransmitter(false); }}
+            onClick={() => { setShowAddCause(!showAddCause); setShowAddSafeguard(false); }}
             className="text-xs font-medium text-purple-600 hover:text-purple-800"
           >
-            {showAddInstrument ? "Cancel" : "+ Add Instrument"}
+            {showAddCause ? "Cancel" : "+ Add Cause Instrument"}
           </button>
         </div>
-        <p className="text-[11px] text-gray-400 mb-2">
-          Control valves, indicators, gauges and other process instruments (excluding transmitters).
-        </p>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100">
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Tag</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Type</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Associated Equipment</th>
-                <th className="text-right py-2 font-medium text-gray-600">Action</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Tag</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Type</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Position</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Line</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Associated Equipment</th>
+                <th className="text-right py-2 font-medium text-gray-600 text-xs">Action</th>
               </tr>
             </thead>
             <tbody>
-              {instruments
-                .map((inst, globalIdx) => ({ inst, globalIdx }))
-                .filter(({ inst }) => !isSafetyDevice(inst) && !isTransmitter(inst))
-                .map(({ inst, globalIdx }) =>
-                  editingInstIndex === globalIdx && editInst ? (
-                    <tr key={`edit-${globalIdx}`} className="border-b border-amber-100 bg-amber-50/30">
-                      <td className="py-2 pr-2">
-                        <input type="text" value={editInst.tag}
-                          onChange={(e) => setEditInst({ ...editInst, tag: e.target.value })}
-                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
-                      </td>
-                      <td className="py-2 pr-2">
-                        <input type="text" list="inst-types" value={editInst.instrument_type}
-                          onChange={(e) => setEditInst({ ...editInst, instrument_type: e.target.value })}
-                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                          placeholder="Type or select" />
-                      </td>
-                      <td className="py-2 pr-2">
-                        <input type="text" value={editInst.associated_equipment_tag ?? ""}
-                          onChange={(e) => setEditInst({ ...editInst, associated_equipment_tag: e.target.value || null })}
-                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
-                      </td>
-                      <td className="py-2 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <button onClick={saveEditInstrument} disabled={!editInst.tag.trim()}
-                            className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
-                          <button onClick={cancelEditInstrument}
-                            className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    <tr key={inst.tag} className="border-b border-gray-50">
-                      <td className="py-2 pr-4 font-mono text-xs">{inst.tag}</td>
-                      <td className="py-2 pr-4">
-                        <span className="px-2 py-0.5 bg-purple-50 text-purple-700 rounded text-xs">{inst.instrument_type}</span>
-                      </td>
-                      <td className="py-2 pr-4 text-gray-500 text-xs">{inst.associated_equipment_tag ?? "—"}</td>
-                      <td className="py-2 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <button onClick={() => startEditInstrument(globalIdx)}
-                            className="text-xs text-amber-600 hover:text-amber-800">Edit</button>
-                          <button onClick={() => removeInstrument(globalIdx)}
-                            className="text-xs text-red-600 hover:text-red-800">Remove</button>
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                )}
-              {/* Add Instrument Inline Row */}
-              {showAddInstrument && (
+              {causeInstruments.map(({ inst, globalIdx }) =>
+                editingInstIndex === globalIdx && editInst ? (
+                  <tr key={`edit-${globalIdx}`} className="border-b border-amber-100 bg-amber-50/30">
+                    <td className="py-2 pr-2">
+                      <input type="text" value={editInst.tag}
+                        onChange={(e) => setEditInst({ ...editInst, tag: e.target.value })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input type="text" list="cause-types" value={editInst.instrument_type}
+                        onChange={(e) => setEditInst({ ...editInst, instrument_type: e.target.value })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded" placeholder="Type" />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <select value={editInst.position ?? ""}
+                        onChange={(e) => setEditInst({ ...editInst, position: e.target.value || null })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded">
+                        <option value="">—</option>
+                        <option value="upstream">Upstream</option>
+                        <option value="downstream">Downstream</option>
+                      </select>
+                    </td>
+                    <td className="py-2 pr-2">
+                      <select value={editInst.line_phase ?? ""}
+                        onChange={(e) => setEditInst({ ...editInst, line_phase: e.target.value || null })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded">
+                        <option value="">—</option>
+                        <option value="gas">Gas</option>
+                        <option value="liquid">Liquid</option>
+                      </select>
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input type="text" value={editInst.associated_equipment_tag ?? ""}
+                        onChange={(e) => setEditInst({ ...editInst, associated_equipment_tag: e.target.value || null })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                    </td>
+                    <td className="py-2 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <button onClick={saveEditInstrument} disabled={!editInst.tag.trim()}
+                          className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
+                        <button onClick={cancelEditInstrument}
+                          className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={inst.tag} className="border-b border-gray-50">
+                    <td className="py-2 pr-3 font-mono text-xs">{inst.tag}</td>
+                    <td className="py-2 pr-3">
+                      <span className="px-2 py-0.5 bg-purple-50 text-purple-700 rounded text-xs">{inst.instrument_type}</span>
+                    </td>
+                    <td className="py-2 pr-3 text-xs text-gray-500 capitalize">{inst.position ?? "—"}</td>
+                    <td className="py-2 pr-3 text-xs text-gray-500 capitalize">{inst.line_phase ?? "—"}</td>
+                    <td className="py-2 pr-3 text-gray-500 text-xs font-mono">{inst.associated_equipment_tag ?? "—"}</td>
+                    <td className="py-2 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <button onClick={() => startEditInstrument(globalIdx)}
+                          className="text-xs text-amber-600 hover:text-amber-800">Edit</button>
+                        <button onClick={() => removeInstrument(globalIdx)}
+                          className="text-xs text-red-600 hover:text-red-800">Remove</button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              )}
+              {/* Add Cause Instrument Inline Row */}
+              {showAddCause && (
                 <tr className="border-b border-purple-100 bg-purple-50/30">
                   <td className="py-2 pr-2">
-                    <input type="text" placeholder="e.g. LT-1210" value={newInstTag}
-                      onChange={(e) => setNewInstTag(e.target.value)}
+                    <input type="text" placeholder="e.g. FSV-1210" value={newCauseTag}
+                      onChange={(e) => setNewCauseTag(e.target.value)}
                       className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
                   </td>
                   <td className="py-2 pr-2">
-                    <input type="text" list="inst-types-process" value={newInstType}
-                      onChange={(e) => setNewInstType(e.target.value)}
+                    <input type="text" list="cause-types" value={newCauseType}
+                      onChange={(e) => setNewCauseType(e.target.value)}
                       className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
                       placeholder="Type or select" />
                   </td>
                   <td className="py-2 pr-2">
-                    <input type="text" placeholder="e.g. V-1210" value={newInstAssocEquip}
-                      onChange={(e) => setNewInstAssocEquip(e.target.value)}
+                    <select value={newCausePosition}
+                      onChange={(e) => setNewCausePosition(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded">
+                      <option value="">—</option>
+                      <option value="upstream">Upstream</option>
+                      <option value="downstream">Downstream</option>
+                    </select>
+                  </td>
+                  <td className="py-2 pr-2">
+                    <select value={newCausePhase}
+                      onChange={(e) => setNewCausePhase(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded">
+                      <option value="">—</option>
+                      <option value="gas">Gas</option>
+                      <option value="liquid">Liquid</option>
+                    </select>
+                  </td>
+                  <td className="py-2 pr-2">
+                    <input type="text" placeholder="e.g. V-1210" value={newCauseAssocEquip}
+                      onChange={(e) => setNewCauseAssocEquip(e.target.value)}
                       className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
                   </td>
                   <td className="py-2 text-right">
-                    <button onClick={addInstrument} disabled={!newInstTag.trim()}
+                    <button onClick={addCauseInstrument} disabled={!newCauseTag.trim()}
                       className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Add</button>
                   </td>
                 </tr>
               )}
-              {instruments.filter((i) => !isSafetyDevice(i) && !isTransmitter(i)).length === 0 && !showAddInstrument && (
+              {causeInstruments.length === 0 && !showAddCause && (
                 <tr>
-                  <td colSpan={4} className="py-3 text-center text-gray-400 text-xs">No instruments detected</td>
+                  <td colSpan={6} className="py-3 text-center text-gray-400 text-xs">No cause instruments detected</td>
                 </tr>
               )}
             </tbody>
@@ -774,221 +707,164 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
         </div>
       </div>
 
-      {/* ---- Transmitters Table (PT, LT, FT, TT, etc.) ---- */}
+      {/* ========================================================
+          SECTION 3 — SAFETY DEVICES / MITIGATION
+          ======================================================== */}
       <div className="px-4 py-3 border-t border-gray-100">
-        <div className="flex items-center justify-between mb-2">
-          <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
-            Transmitters ({instruments.filter(isTransmitter).length})
-          </h4>
+        <div className="flex items-center justify-between mb-1">
+          <div>
+            <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+              3. Safety Devices / Mitigation ({safeguardInstruments.length})
+            </h4>
+            <p className="text-[11px] text-gray-400 mt-0.5">
+              PSV, PSHH, PSLL, LSHH, LSLL, VSHH, interlocks, ESD/SDV trip devices.
+            </p>
+          </div>
           <button
-            onClick={() => { setShowAddTransmitter(!showAddTransmitter); setShowAddInstrument(false); setShowAddSafetyDevice(false); }}
-            className="text-xs font-medium text-teal-600 hover:text-teal-800"
-          >
-            {showAddTransmitter ? "Cancel" : "+ Add Transmitter"}
-          </button>
-        </div>
-        <p className="text-[11px] text-gray-400 mb-2">
-          Pressure, level, flow and temperature transmitters (PT, LT, FT, TT, etc.). Excluded from cause generation — measurement only.
-        </p>
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100">
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Tag</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Type</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Associated Equipment</th>
-                <th className="text-right py-2 font-medium text-gray-600">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {instruments
-                .map((inst, globalIdx) => ({ inst, globalIdx }))
-                .filter(({ inst }) => isTransmitter(inst))
-                .map(({ inst, globalIdx }) =>
-                  editingInstIndex === globalIdx && editInst ? (
-                    <tr key={`edit-${globalIdx}`} className="border-b border-amber-100 bg-amber-50/30">
-                      <td className="py-2 pr-2">
-                        <input type="text" value={editInst.tag}
-                          onChange={(e) => setEditInst({ ...editInst, tag: e.target.value })}
-                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
-                      </td>
-                      <td className="py-2 pr-2">
-                        <input type="text" list="inst-types-transmitter" value={editInst.instrument_type}
-                          onChange={(e) => setEditInst({ ...editInst, instrument_type: e.target.value })}
-                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                          placeholder="Type or select" />
-                      </td>
-                      <td className="py-2 pr-2">
-                        <input type="text" value={editInst.associated_equipment_tag ?? ""}
-                          onChange={(e) => setEditInst({ ...editInst, associated_equipment_tag: e.target.value || null })}
-                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
-                      </td>
-                      <td className="py-2 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <button onClick={saveEditInstrument} disabled={!editInst.tag.trim()}
-                            className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
-                          <button onClick={cancelEditInstrument}
-                            className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    <tr key={inst.tag} className="border-b border-gray-50">
-                      <td className="py-2 pr-4 font-mono text-xs">{inst.tag}</td>
-                      <td className="py-2 pr-4">
-                        <span className="px-2 py-0.5 bg-teal-50 text-teal-700 rounded text-xs">{inst.instrument_type}</span>
-                      </td>
-                      <td className="py-2 pr-4 text-gray-500 text-xs">{inst.associated_equipment_tag ?? "—"}</td>
-                      <td className="py-2 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <button onClick={() => startEditInstrument(globalIdx)}
-                            className="text-xs text-amber-600 hover:text-amber-800">Edit</button>
-                          <button onClick={() => removeInstrument(globalIdx)}
-                            className="text-xs text-red-600 hover:text-red-800">Remove</button>
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                )}
-              {/* Add Transmitter Inline Row */}
-              {showAddTransmitter && (
-                <tr className="border-b border-teal-100 bg-teal-50/30">
-                  <td className="py-2 pr-2">
-                    <input type="text" placeholder="e.g. PT-1210" value={newTrTag}
-                      onChange={(e) => setNewTrTag(e.target.value)}
-                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
-                  </td>
-                  <td className="py-2 pr-2">
-                    <input type="text" list="inst-types-transmitter" value={newTrType}
-                      onChange={(e) => setNewTrType(e.target.value)}
-                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                      placeholder="Type or select" />
-                  </td>
-                  <td className="py-2 pr-2">
-                    <input type="text" placeholder="e.g. V-1210" value={newTrAssocEquip}
-                      onChange={(e) => setNewTrAssocEquip(e.target.value)}
-                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
-                  </td>
-                  <td className="py-2 text-right">
-                    <button onClick={addTransmitter} disabled={!newTrTag.trim()}
-                      className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Add</button>
-                  </td>
-                </tr>
-              )}
-              {instruments.filter(isTransmitter).length === 0 && !showAddTransmitter && (
-                <tr>
-                  <td colSpan={4} className="py-3 text-center text-gray-400 text-xs">No transmitters detected</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* ---- Safety Devices Table (PSVs, high-high switches, gas detectors, ESD valves, etc.) ---- */}
-      <div className="px-4 py-3 border-t border-gray-100">
-        <div className="flex items-center justify-between mb-2">
-          <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
-            Safety Devices ({instruments.filter(isSafetyDevice).length})
-          </h4>
-          <button
-            onClick={() => { setShowAddSafetyDevice(!showAddSafetyDevice); setShowAddInstrument(false); setShowAddTransmitter(false); }}
+            onClick={() => { setShowAddSafeguard(!showAddSafeguard); setShowAddCause(false); }}
             className="text-xs font-medium text-red-600 hover:text-red-800"
           >
-            {showAddSafetyDevice ? "Cancel" : "+ Add Safety Device"}
+            {showAddSafeguard ? "Cancel" : "+ Add Safety Device"}
           </button>
         </div>
-        <p className="text-[11px] text-gray-400 mb-2">
-          Safety switches (PSHH/LSHH), relief valves (PSV/PRV), gas/fire detectors, ESD valves and deluge systems.
-        </p>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100">
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Tag</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Type</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-600">Associated Equipment</th>
-                <th className="text-right py-2 font-medium text-gray-600">Action</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Tag</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Type</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Setpoint</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Position</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Line</th>
+                <th className="text-left py-2 pr-3 font-medium text-gray-600 text-xs">Associated Equipment</th>
+                <th className="text-right py-2 font-medium text-gray-600 text-xs">Action</th>
               </tr>
             </thead>
             <tbody>
-              {instruments
-                .map((inst, globalIdx) => ({ inst, globalIdx }))
-                .filter(({ inst }) => isSafetyDevice(inst))
-                .map(({ inst, globalIdx }) =>
-                  editingInstIndex === globalIdx && editInst ? (
-                    <tr key={`edit-${globalIdx}`} className="border-b border-amber-100 bg-amber-50/30">
-                      <td className="py-2 pr-2">
-                        <input type="text" value={editInst.tag}
-                          onChange={(e) => setEditInst({ ...editInst, tag: e.target.value })}
-                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
-                      </td>
-                      <td className="py-2 pr-2">
-                        <input type="text" list="inst-types-safety" value={editInst.instrument_type}
-                          onChange={(e) => setEditInst({ ...editInst, instrument_type: e.target.value })}
-                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
-                          placeholder="Type or select" />
-                      </td>
-                      <td className="py-2 pr-2">
-                        <input type="text" value={editInst.associated_equipment_tag ?? ""}
-                          onChange={(e) => setEditInst({ ...editInst, associated_equipment_tag: e.target.value || null })}
-                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
-                      </td>
-                      <td className="py-2 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <button onClick={saveEditInstrument} disabled={!editInst.tag.trim()}
-                            className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
-                          <button onClick={cancelEditInstrument}
-                            className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    <tr key={inst.tag} className="border-b border-gray-50">
-                      <td className="py-2 pr-4 font-mono text-xs">{inst.tag}</td>
-                      <td className="py-2 pr-4">
-                        <span className="px-2 py-0.5 bg-red-50 text-red-700 rounded text-xs">{inst.instrument_type}</span>
-                      </td>
-                      <td className="py-2 pr-4 text-gray-500 text-xs">{inst.associated_equipment_tag ?? "—"}</td>
-                      <td className="py-2 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <button onClick={() => startEditInstrument(globalIdx)}
-                            className="text-xs text-amber-600 hover:text-amber-800">Edit</button>
-                          <button onClick={() => removeInstrument(globalIdx)}
-                            className="text-xs text-red-600 hover:text-red-800">Remove</button>
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                )}
+              {safeguardInstruments.map(({ inst, globalIdx }) =>
+                editingInstIndex === globalIdx && editInst ? (
+                  <tr key={`edit-${globalIdx}`} className="border-b border-amber-100 bg-amber-50/30">
+                    <td className="py-2 pr-2">
+                      <input type="text" value={editInst.tag}
+                        onChange={(e) => setEditInst({ ...editInst, tag: e.target.value })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input type="text" list="safeguard-types" value={editInst.instrument_type}
+                        onChange={(e) => setEditInst({ ...editInst, instrument_type: e.target.value })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded" placeholder="Type" />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input type="number" value={editInst.setpoint ?? ""}
+                        onChange={(e) => setEditInst({ ...editInst, setpoint: e.target.value ? parseFloat(e.target.value) : null })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded" placeholder="PSIG" />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <select value={editInst.position ?? ""}
+                        onChange={(e) => setEditInst({ ...editInst, position: e.target.value || null })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded">
+                        <option value="">—</option>
+                        <option value="upstream">Upstream</option>
+                        <option value="downstream">Downstream</option>
+                      </select>
+                    </td>
+                    <td className="py-2 pr-2">
+                      <select value={editInst.line_phase ?? ""}
+                        onChange={(e) => setEditInst({ ...editInst, line_phase: e.target.value || null })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded">
+                        <option value="">—</option>
+                        <option value="gas">Gas</option>
+                        <option value="liquid">Liquid</option>
+                      </select>
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input type="text" value={editInst.associated_equipment_tag ?? ""}
+                        onChange={(e) => setEditInst({ ...editInst, associated_equipment_tag: e.target.value || null })}
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
+                    </td>
+                    <td className="py-2 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <button onClick={saveEditInstrument} disabled={!editInst.tag.trim()}
+                          className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Save</button>
+                        <button onClick={cancelEditInstrument}
+                          className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={inst.tag} className="border-b border-gray-50">
+                    <td className="py-2 pr-3 font-mono text-xs">{inst.tag}</td>
+                    <td className="py-2 pr-3">
+                      <span className="px-2 py-0.5 bg-red-50 text-red-700 rounded text-xs">{inst.instrument_type}</span>
+                    </td>
+                    <td className="py-2 pr-3 text-xs text-gray-500">
+                      {inst.setpoint != null ? `${inst.setpoint} PSIG` : "—"}
+                    </td>
+                    <td className="py-2 pr-3 text-xs text-gray-500 capitalize">{inst.position ?? "—"}</td>
+                    <td className="py-2 pr-3 text-xs text-gray-500 capitalize">{inst.line_phase ?? "—"}</td>
+                    <td className="py-2 pr-3 text-gray-500 text-xs font-mono">{inst.associated_equipment_tag ?? "—"}</td>
+                    <td className="py-2 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <button onClick={() => startEditInstrument(globalIdx)}
+                          className="text-xs text-amber-600 hover:text-amber-800">Edit</button>
+                        <button onClick={() => removeInstrument(globalIdx)}
+                          className="text-xs text-red-600 hover:text-red-800">Remove</button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              )}
               {/* Add Safety Device Inline Row */}
-              {showAddSafetyDevice && (
+              {showAddSafeguard && (
                 <tr className="border-b border-red-100 bg-red-50/30">
                   <td className="py-2 pr-2">
-                    <input type="text" placeholder="e.g. PSHH-1210" value={newSdTag}
-                      onChange={(e) => setNewSdTag(e.target.value)}
+                    <input type="text" placeholder="e.g. PSHH-1210" value={newSgTag}
+                      onChange={(e) => setNewSgTag(e.target.value)}
                       className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
                   </td>
                   <td className="py-2 pr-2">
-                    <input type="text" list="inst-types-safety" value={newSdType}
-                      onChange={(e) => setNewSdType(e.target.value)}
+                    <input type="text" list="safeguard-types" value={newSgType}
+                      onChange={(e) => setNewSgType(e.target.value)}
                       className="w-full px-2 py-1 text-xs border border-gray-300 rounded"
                       placeholder="Type or select" />
                   </td>
                   <td className="py-2 pr-2">
-                    <input type="text" placeholder="e.g. V-1210" value={newSdAssocEquip}
-                      onChange={(e) => setNewSdAssocEquip(e.target.value)}
+                    <input type="number" placeholder="PSIG" value={newSgSetpoint}
+                      onChange={(e) => setNewSgSetpoint(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
+                  </td>
+                  <td className="py-2 pr-2">
+                    <select value={newSgPosition}
+                      onChange={(e) => setNewSgPosition(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded">
+                      <option value="">—</option>
+                      <option value="upstream">Upstream</option>
+                      <option value="downstream">Downstream</option>
+                    </select>
+                  </td>
+                  <td className="py-2 pr-2">
+                    <select value={newSgPhase}
+                      onChange={(e) => setNewSgPhase(e.target.value)}
+                      className="w-full px-2 py-1 text-xs border border-gray-300 rounded">
+                      <option value="">—</option>
+                      <option value="gas">Gas</option>
+                      <option value="liquid">Liquid</option>
+                    </select>
+                  </td>
+                  <td className="py-2 pr-2">
+                    <input type="text" placeholder="e.g. V-1210" value={newSgAssocEquip}
+                      onChange={(e) => setNewSgAssocEquip(e.target.value)}
                       className="w-full px-2 py-1 text-xs border border-gray-300 rounded font-mono" />
                   </td>
                   <td className="py-2 text-right">
-                    <button onClick={addSafetyDevice} disabled={!newSdTag.trim()}
+                    <button onClick={addSafeguard} disabled={!newSgTag.trim()}
                       className="text-xs font-medium text-green-600 hover:text-green-800 disabled:text-gray-400">Add</button>
                   </td>
                 </tr>
               )}
-              {instruments.filter(isSafetyDevice).length === 0 && !showAddSafetyDevice && (
+              {safeguardInstruments.length === 0 && !showAddSafeguard && (
                 <tr>
-                  <td colSpan={4} className="py-3 text-center text-gray-400 text-xs">No safety devices detected</td>
+                  <td colSpan={7} className="py-3 text-center text-gray-400 text-xs">No safety devices detected</td>
                 </tr>
               )}
             </tbody>
@@ -1050,14 +926,11 @@ export default function EquipmentReviewTable({ node, onValidated }: EquipmentRev
       <datalist id="eq-types">
         {COMMON_EQUIPMENT_TYPES.map((t) => <option key={t} value={t} />)}
       </datalist>
-      <datalist id="inst-types-process">
-        {INSTRUMENT_ONLY_TYPES.map((t) => <option key={t} value={t} />)}
+      <datalist id="cause-types">
+        {CAUSE_INSTRUMENT_TYPES.map((t) => <option key={t} value={t} />)}
       </datalist>
-      <datalist id="inst-types-transmitter">
-        {TRANSMITTER_TYPES.map((t) => <option key={t} value={t} />)}
-      </datalist>
-      <datalist id="inst-types-safety">
-        {SAFETY_DEVICE_TYPES.map((t) => <option key={t} value={t} />)}
+      <datalist id="safeguard-types">
+        {SAFEGUARD_TYPES.map((t) => <option key={t} value={t} />)}
       </datalist>
     </div>
   );

@@ -76,6 +76,7 @@ _EXCLUDED_REASON: dict[str, str] = {
     "indicator": "Indicator / gauge — display-only device, not a root cause",
     "alarm": "Alarm — output device, not a root cause",
     "unknown": "Monitoring / safety device — excluded to keep LLM focus on process causes",
+    "role_safeguard": "Safeguard device — role assigned during P&ID extraction",
 }
 
 
@@ -142,6 +143,8 @@ def _classify_instruments_for_llm(
                     "instrument_type": inst_type,
                     "setpoint": inst.setpoint,
                     "associated_equipment_tag": inst.associated_equipment_tag,
+                    "position": inst.position,
+                    "line_phase": inst.line_phase,
                 })
                 included_ctx.append(LLMContextItem(
                     tag=inst.tag,
@@ -155,23 +158,43 @@ def _classify_instruments_for_llm(
                     reason="Excluded by SME override",
                 ))
             else:
-                # Tags not in either list fall back to default classification
-                prefix = _get_tag_prefix(inst.tag)
-                if prefix in _LLM_EXCLUDED_PREFIXES:
-                    excluded_ctx.append(LLMContextItem(
-                        tag=inst.tag, instrument_type=inst_type,
-                        reason=_excluded_reason_for_prefix(prefix),
-                    ))
-                else:
+                # Tags not in either list fall back to instrument_role, then prefix
+                if inst.instrument_role == "cause":
                     included_dicts.append({
                         "tag": inst.tag, "instrument_type": inst_type,
                         "setpoint": inst.setpoint,
                         "associated_equipment_tag": inst.associated_equipment_tag,
+                        "position": inst.position,
+                        "line_phase": inst.line_phase,
                     })
                     included_ctx.append(LLMContextItem(
                         tag=inst.tag, instrument_type=inst_type,
-                        reason="Process instrument — included as potential cause context",
+                        reason="Control valve — role assigned by P&ID extraction",
                     ))
+                elif inst.instrument_role == "safeguard":
+                    excluded_ctx.append(LLMContextItem(
+                        tag=inst.tag, instrument_type=inst_type,
+                        reason=_EXCLUDED_REASON["role_safeguard"],
+                    ))
+                else:
+                    prefix = _get_tag_prefix(inst.tag)
+                    if prefix in _LLM_EXCLUDED_PREFIXES:
+                        excluded_ctx.append(LLMContextItem(
+                            tag=inst.tag, instrument_type=inst_type,
+                            reason=_excluded_reason_for_prefix(prefix),
+                        ))
+                    else:
+                        included_dicts.append({
+                            "tag": inst.tag, "instrument_type": inst_type,
+                            "setpoint": inst.setpoint,
+                            "associated_equipment_tag": inst.associated_equipment_tag,
+                            "position": inst.position,
+                            "line_phase": inst.line_phase,
+                        })
+                        included_ctx.append(LLMContextItem(
+                            tag=inst.tag, instrument_type=inst_type,
+                            reason="Process instrument — included as potential cause context",
+                        ))
 
         return included_dicts, included_ctx, excluded_ctx
 
@@ -187,14 +210,36 @@ def _classify_instruments_for_llm(
         prefix = _get_tag_prefix(inst.tag)
         inst_type = inst.instrument_type
 
-        # BDV conditional: if BDV in node, SDV/ESV/BDV/XV are included for causes
-        if bdv_in_node and prefix in _BDV_CONDITIONAL_PREFIXES:
+        # Primary: use instrument_role if set by P&ID extraction
+        if inst.instrument_role == "cause":
+            reason = "Control valve — role assigned by P&ID extraction"
+            included_dicts.append({
+                "tag": inst.tag,
+                "instrument_type": inst_type,
+                "setpoint": inst.setpoint,
+                "associated_equipment_tag": inst.associated_equipment_tag,
+                "position": inst.position,
+                "line_phase": inst.line_phase,
+            })
+            included_ctx.append(LLMContextItem(
+                tag=inst.tag, instrument_type=inst_type, reason=reason,
+            ))
+        elif inst.instrument_role == "safeguard":
+            excluded_ctx.append(LLMContextItem(
+                tag=inst.tag,
+                instrument_type=inst_type,
+                reason=_EXCLUDED_REASON["role_safeguard"],
+            ))
+        # Fallback: BDV conditional logic for instruments without instrument_role
+        elif bdv_in_node and prefix in _BDV_CONDITIONAL_PREFIXES:
             reason = "Shutdown/blowdown valve — included because BDV detected in node"
             included_dicts.append({
                 "tag": inst.tag,
                 "instrument_type": inst_type,
                 "setpoint": inst.setpoint,
                 "associated_equipment_tag": inst.associated_equipment_tag,
+                "position": inst.position,
+                "line_phase": inst.line_phase,
             })
             included_ctx.append(LLMContextItem(
                 tag=inst.tag, instrument_type=inst_type, reason=reason,
@@ -220,6 +265,8 @@ def _classify_instruments_for_llm(
                 "instrument_type": inst_type,
                 "setpoint": inst.setpoint,
                 "associated_equipment_tag": inst.associated_equipment_tag,
+                "position": inst.position,
+                "line_phase": inst.line_phase,
             })
             included_ctx.append(LLMContextItem(
                 tag=inst.tag,
