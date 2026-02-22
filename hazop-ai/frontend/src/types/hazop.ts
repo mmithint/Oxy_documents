@@ -288,6 +288,14 @@ export interface GenerateCausesResponse {
 
 // --- Consequence Review Types ---
 
+export interface CategoryRow {
+  category: "PAF" | "PD/LOR" | "ECR";
+  consequences: string[];
+  scenario_comments: string | null;
+  current_risk: string | null;
+  pec: string | null;
+}
+
 export interface OverpressureCalc {
   /** Maximum credible pressure (upstream_pressure_psig from node). */
   max_credible_pressure: number;
@@ -324,6 +332,8 @@ export interface DeviationConsequences {
   /** Current risk level from table, e.g. "C5". PEC-1 → C5. */
   current_risk: string | null;
   overpressure_calc: OverpressureCalc | null;
+  /** Per-category rows for table view (PAF / PD/LOR / ECR). Frontend-only field. */
+  category_rows?: CategoryRow[];
 }
 
 export interface ConsequenceGenerationResponse {

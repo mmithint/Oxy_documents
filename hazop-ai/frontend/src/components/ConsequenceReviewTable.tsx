@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import type { DeviationConsequences, OverpressureCalc } from "../types/hazop";
+import type { DeviationConsequences, OverpressureCalc, CategoryRow } from "../types/hazop";
 import { generateConsequences, approveConsequences } from "../services/api";
 
 interface ConsequenceReviewTableProps {
@@ -20,7 +20,47 @@ type EditTarget = { devIdx: number; field: "intermediate" | "consequences"; item
 
 // Table-view inline edit state
 type TableIntermEdit = { devIdx: number; value: string } | null;
-type TableScenarioEdit = { devIdx: number; scenarioVal: string; consequencesVal: string } | null;
+type TableCatRowEdit = { devIdx: number; rowIdx: number; scenarioVal: string; consequencesVal: string } | null;
+
+// ---------------------------------------------------------------------------
+// Helpers — initialize category rows from legacy flat data
+// ---------------------------------------------------------------------------
+
+function initCategoryRows(dev: DeviationConsequences): CategoryRow[] {
+  return [
+    {
+      category: "PAF",
+      consequences: dev.consequences ?? [],
+      scenario_comments: dev.scenario_comments ?? null,
+      current_risk: dev.current_risk ?? null,
+      pec: dev.pec ?? null,
+    },
+    {
+      category: "PD/LOR",
+      consequences: ["Downtime of approximately X to X months"],
+      scenario_comments: null,
+      current_risk: null,
+      pec: null,
+    },
+    {
+      category: "ECR",
+      consequences: [],
+      scenario_comments: null,
+      current_risk: null,
+      pec: null,
+    },
+  ];
+}
+
+function normalizeConsequences(list: DeviationConsequences[]): DeviationConsequences[] {
+  return list.map((dev) => ({
+    ...dev,
+    category_rows:
+      dev.category_rows && dev.category_rows.length > 0
+        ? dev.category_rows
+        : initCategoryRows(dev),
+  }));
+}
 
 export default function ConsequenceReviewTable({
   nodeId,
@@ -49,19 +89,18 @@ export default function ConsequenceReviewTable({
   // View mode
   const [viewMode, setViewMode] = useState<"card" | "table">("card");
 
-  // Table-view inline edit state
+  // Table-view edit state
   const [tableIntermEdit, setTableIntermEdit] = useState<TableIntermEdit>(null);
-  const [tableScenarioEdit, setTableScenarioEdit] = useState<TableScenarioEdit>(null);
-  const [tableEditingCategory, setTableEditingCategory] = useState<number | null>(null);
-  const [tableEditingPec, setTableEditingPec] = useState<number | null>(null);
-  const [tableEditingCurrentRisk, setTableEditingCurrentRisk] = useState<number | null>(null);
+  const [tableCatRowEdit, setTableCatRowEdit] = useState<TableCatRowEdit>(null);
+  const [tableCatPecEdit, setTableCatPecEdit] = useState<{ devIdx: number; rowIdx: number } | null>(null);
+  const [tableCatRiskEdit, setTableCatRiskEdit] = useState<{ devIdx: number; rowIdx: number } | null>(null);
 
   const hasTriggered = useRef(false);
   useEffect(() => {
     if (hasTriggered.current) return;
     hasTriggered.current = true;
     if (initialConsequences && initialConsequences.length > 0) {
-      setDeviationConsequences(initialConsequences);
+      setDeviationConsequences(normalizeConsequences(initialConsequences));
       setGenerated(true);
     } else if (nodeId) {
       handleGenerate();
@@ -115,7 +154,7 @@ export default function ConsequenceReviewTable({
       await new Promise((r) => setTimeout(r, 400));
       setProgressSteps((prev) => prev.map((s) => ({ ...s, status: "done" as const })));
 
-      setDeviationConsequences(result.deviation_consequences);
+      setDeviationConsequences(normalizeConsequences(result.deviation_consequences));
       setGenerated(true);
     } catch (err: unknown) {
       let message = "Failed to generate consequences. Check if the backend is running.";
@@ -212,7 +251,6 @@ export default function ConsequenceReviewTable({
       return updated;
     });
     setEditingCategory(null);
-    setTableEditingCategory(null);
   };
 
   const handlePecChange = (devIdx: number, value: string) => {
@@ -221,7 +259,6 @@ export default function ConsequenceReviewTable({
       updated[devIdx] = { ...updated[devIdx], pec: value };
       return updated;
     });
-    setTableEditingPec(null);
   };
 
   const handleCurrentRiskChange = (devIdx: number, value: string) => {
@@ -230,10 +267,9 @@ export default function ConsequenceReviewTable({
       updated[devIdx] = { ...updated[devIdx], current_risk: value };
       return updated;
     });
-    setTableEditingCurrentRisk(null);
   };
 
-  // ---- Table-view edit helpers ----
+  // ---- Table-view intermediate edit ----
 
   const openTableIntermEdit = (devIdx: number) => {
     const value = deviationConsequences[devIdx].intermediate_consequences.join("\n");
@@ -251,29 +287,58 @@ export default function ConsequenceReviewTable({
     setTableIntermEdit(null);
   };
 
-  const openTableScenarioEdit = (devIdx: number) => {
-    const dev = deviationConsequences[devIdx];
-    setTableScenarioEdit({
+  // ---- Table-view per-category row edit ----
+
+  const openCatRowEdit = (devIdx: number, rowIdx: number) => {
+    const row = (deviationConsequences[devIdx].category_rows ?? [])[rowIdx];
+    setTableCatRowEdit({
       devIdx,
-      scenarioVal: dev.scenario_comments ?? "",
-      consequencesVal: dev.consequences.join("\n"),
+      rowIdx,
+      scenarioVal: row?.scenario_comments ?? "",
+      consequencesVal: (row?.consequences ?? []).join("\n"),
     });
   };
 
-  const saveTableScenarioEdit = () => {
-    if (!tableScenarioEdit) return;
-    const consequences = tableScenarioEdit.consequencesVal
-      .split("\n").map((s) => s.trim()).filter(Boolean);
+  const saveCatRowEdit = () => {
+    if (!tableCatRowEdit) return;
+    const { devIdx, rowIdx, scenarioVal, consequencesVal } = tableCatRowEdit;
+    const consequences = consequencesVal.split("\n").map((s) => s.trim()).filter(Boolean);
     setDeviationConsequences((prev) => {
       const updated = [...prev];
-      updated[tableScenarioEdit.devIdx] = {
-        ...updated[tableScenarioEdit.devIdx],
-        scenario_comments: tableScenarioEdit.scenarioVal || null,
-        consequences,
-      };
+      const dev = { ...updated[devIdx] };
+      const rows = [...(dev.category_rows ?? [])];
+      rows[rowIdx] = { ...rows[rowIdx], consequences, scenario_comments: scenarioVal || null };
+      dev.category_rows = rows;
+      updated[devIdx] = dev;
       return updated;
     });
-    setTableScenarioEdit(null);
+    setTableCatRowEdit(null);
+  };
+
+  const handleCatRowPecChange = (devIdx: number, rowIdx: number, value: string) => {
+    setDeviationConsequences((prev) => {
+      const updated = [...prev];
+      const dev = { ...updated[devIdx] };
+      const rows = [...(dev.category_rows ?? [])];
+      rows[rowIdx] = { ...rows[rowIdx], pec: value };
+      dev.category_rows = rows;
+      updated[devIdx] = dev;
+      return updated;
+    });
+    setTableCatPecEdit(null);
+  };
+
+  const handleCatRowRiskChange = (devIdx: number, rowIdx: number, value: string) => {
+    setDeviationConsequences((prev) => {
+      const updated = [...prev];
+      const dev = { ...updated[devIdx] };
+      const rows = [...(dev.category_rows ?? [])];
+      rows[rowIdx] = { ...rows[rowIdx], current_risk: value };
+      dev.category_rows = rows;
+      updated[devIdx] = dev;
+      return updated;
+    });
+    setTableCatRiskEdit(null);
   };
 
   // ---- Approve ----
@@ -311,6 +376,13 @@ export default function ConsequenceReviewTable({
     {}
   );
 
+  // ---- Category colors ----
+  const catColors: Record<string, string> = {
+    PAF: "bg-red-100 text-red-700 border-red-300",
+    "PD/LOR": "bg-amber-100 text-amber-700 border-amber-300",
+    ECR: "bg-green-100 text-green-700 border-green-300",
+  };
+
   // ---- Render ----
 
   return (
@@ -324,7 +396,6 @@ export default function ConsequenceReviewTable({
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {/* View toggle — only shown when data is loaded */}
           {generated && (
             <div className="flex items-center gap-1 bg-gray-100 rounded-md p-0.5">
               <button
@@ -423,7 +494,6 @@ export default function ConsequenceReviewTable({
             </div>
           ))}
 
-          {/* Approval Section */}
           <ApprovalSection
             smeName={smeName}
             comments={comments}
@@ -443,338 +513,334 @@ export default function ConsequenceReviewTable({
             <div className="overflow-x-auto">
               <table className="min-w-full text-xs border-collapse">
                 <thead>
-                  <tr className="bg-gray-50 border-b border-gray-200">
-                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap border-r border-gray-200 w-48">
+                  <tr className="bg-gray-50 border-b-2 border-gray-300">
+                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap border-r border-gray-200 w-44">
                       Deviation
                     </th>
                     <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide border-r border-gray-200 w-52">
                       Cause
                     </th>
                     <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap border-r border-gray-200 w-32">
-                      Drawing / Reference
+                      Drawings / References
                     </th>
-                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide border-r border-gray-200 w-60">
+                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide border-r border-gray-200 w-56">
                       Intermediate Consequences
                       <span className="ml-1 text-gray-400 normal-case font-normal text-[10px]">(click to edit)</span>
                     </th>
-                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap border-r border-gray-200 w-28">
-                      Category
+                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide border-r border-gray-200 w-24">
+                      <span>Cons. Cat</span>
+                      <div className="text-[9px] font-normal normal-case text-gray-400 leading-tight mt-0.5">
+                        Defined in HSE Risk Assessment
+                      </div>
                     </th>
-                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap border-r border-gray-200 w-24">
-                      PEC
-                      <span className="ml-1 text-gray-400 normal-case font-normal text-[10px]">(click)</span>
-                    </th>
-                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap border-r border-gray-200 w-24">
-                      Current Risk
-                      <span className="ml-1 text-gray-400 normal-case font-normal text-[10px]">(click)</span>
-                    </th>
-                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide w-72">
+                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide border-r border-gray-200 w-72">
                       Scenario Comments / Final Impacts
                       <span className="ml-1 text-gray-400 normal-case font-normal text-[10px]">(click to edit)</span>
                     </th>
+                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap border-r border-gray-200 w-20">
+                      PEC
+                    </th>
+                    <th className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap w-20">
+                      Current Risk
+                    </th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {deviationConsequences.map((dev, idx) => {
-                    const catColors: Record<string, string> = {
-                      PAF: "bg-red-100 text-red-700 border-red-300",
-                      "PD/LOR": "bg-amber-100 text-amber-700 border-amber-300",
-                      ECR: "bg-green-100 text-green-700 border-green-300",
-                    };
-                    const isEditingInterm = tableIntermEdit?.devIdx === idx;
-                    const isEditingScenario = tableScenarioEdit?.devIdx === idx;
-                    const isEditingCat = tableEditingCategory === idx;
-                    const isEditingPec = tableEditingPec === idx;
-                    const isEditingCurrentRisk = tableEditingCurrentRisk === idx;
+                <tbody>
+                  {deviationConsequences.flatMap((dev, devIdx) => {
+                    const catRows = dev.category_rows ?? [];
+                    const isEditingInterm = tableIntermEdit?.devIdx === devIdx;
 
-                    return (
-                      <tr key={dev.deviation_id} className="hover:bg-gray-50 align-top">
-                        {/* Deviation */}
-                        <td className="px-3 py-2.5 border-r border-gray-100">
-                          <div className="flex flex-col gap-1">
-                            <span className="font-mono text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded self-start">
-                              {dev.guideword}
-                            </span>
-                            <span className="font-medium text-gray-900 leading-snug">{dev.deviation}</span>
-                            <span className="text-gray-400 text-[10px]">{dev.equipment_tag}</span>
-                            {dev.overpressure_calc?.assumed_leak_size && (
-                              <span className={`text-[10px] rounded px-1.5 py-0.5 self-start font-semibold border ${
-                                dev.overpressure_calc.exceeds_2x
-                                  ? "bg-amber-100 text-amber-700 border-amber-300"
-                                  : "bg-yellow-50 text-yellow-700 border-yellow-300"
-                              }`}>
-                                {dev.overpressure_calc.exceeds_2x ? "⚠ " : ""}
-                                {dev.overpressure_calc.assumed_leak_size} leak
-                                {" "}({dev.overpressure_calc.ratio.toFixed(2)}×)
-                              </span>
-                            )}
-                          </div>
-                        </td>
+                    return catRows.map((row, rowIdx) => {
+                      const isFirst = rowIdx === 0;
+                      const isLast = rowIdx === catRows.length - 1;
+                      const isEditingCatRow = tableCatRowEdit?.devIdx === devIdx && tableCatRowEdit?.rowIdx === rowIdx;
+                      const isEditingPec = tableCatPecEdit?.devIdx === devIdx && tableCatPecEdit?.rowIdx === rowIdx;
+                      const isEditingRisk = tableCatRiskEdit?.devIdx === devIdx && tableCatRiskEdit?.rowIdx === rowIdx;
 
-                        {/* Causes */}
-                        <td className="px-3 py-2.5 border-r border-gray-100">
-                          <ul className="space-y-1">
-                            {dev.causes.map((cause, ci) => (
-                              <li key={ci} className="flex items-start gap-1.5 text-gray-700 leading-snug">
-                                <span className="text-gray-300 flex-shrink-0 mt-0.5">•</span>
-                                {cause}
-                              </li>
-                            ))}
-                          </ul>
-                        </td>
+                      const riskColorCls = !row.current_risk
+                        ? "bg-gray-50 text-gray-400 border-dashed border-gray-300"
+                        : row.current_risk.startsWith("E") || row.current_risk === "5"
+                        ? "bg-red-200 text-red-900 border-red-400"
+                        : row.current_risk.startsWith("D") || row.current_risk === "4"
+                        ? "bg-red-100 text-red-700 border-red-300"
+                        : row.current_risk.startsWith("C") || row.current_risk === "3"
+                        ? "bg-amber-100 text-amber-700 border-amber-300"
+                        : "bg-yellow-50 text-yellow-700 border-yellow-200";
 
-                        {/* Drawing / Reference */}
-                        <td className="px-3 py-2.5 border-r border-gray-100">
-                          {dev.drawing_references.length > 0 ? (
-                            <span className="text-blue-700 font-medium">
-                              {dev.drawing_references.join(", ")}
-                            </span>
-                          ) : (
-                            <span className="text-gray-300 italic">—</span>
-                          )}
-                        </td>
-
-                        {/* Intermediate Consequences — click to edit */}
-                        <td
-                          className="px-3 py-2.5 border-r border-gray-100 cursor-pointer"
-                          onClick={() => { if (!isEditingInterm) openTableIntermEdit(idx); }}
+                      return (
+                        <tr
+                          key={`${dev.deviation_id}-${rowIdx}`}
+                          className={`align-top ${isLast ? "border-b-2 border-gray-300" : "border-b border-gray-100"}`}
                         >
-                          {isEditingInterm ? (
-                            <div className="space-y-1.5" onClick={(e) => e.stopPropagation()}>
-                              <textarea
-                                autoFocus
-                                rows={5}
-                                value={tableIntermEdit!.value}
-                                onChange={(e) => setTableIntermEdit({ devIdx: idx, value: e.target.value })}
-                                className="w-full px-2 py-1 text-xs border border-blue-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none"
-                                placeholder="One item per line…"
-                              />
-                              <div className="flex gap-1">
-                                <button
-                                  onClick={saveTableIntermEdit}
-                                  className="text-[10px] px-2 py-0.5 bg-blue-500 text-white rounded hover:bg-blue-600"
-                                >Save</button>
-                                <button
-                                  onClick={() => setTableIntermEdit(null)}
-                                  className="text-[10px] px-2 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
-                                >Cancel</button>
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="group relative">
-                              {dev.intermediate_consequences.length > 0 ? (
+                          {/* ---- Spanning cells (first row only) ---- */}
+                          {isFirst && (
+                            <>
+                              {/* Deviation */}
+                              <td
+                                rowSpan={catRows.length}
+                                className="px-3 py-2.5 border-r border-gray-200 align-top"
+                              >
+                                <div className="flex flex-col gap-1">
+                                  <span className="font-mono text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded self-start">
+                                    {dev.guideword}
+                                  </span>
+                                  <span className="font-medium text-gray-900 leading-snug">{dev.deviation}</span>
+                                  <span className="text-gray-400 text-[10px]">{dev.equipment_tag}</span>
+                                  {dev.overpressure_calc?.assumed_leak_size && (
+                                    <span className={`text-[10px] rounded px-1.5 py-0.5 self-start font-semibold border ${
+                                      dev.overpressure_calc.exceeds_2x
+                                        ? "bg-amber-100 text-amber-700 border-amber-300"
+                                        : "bg-yellow-50 text-yellow-700 border-yellow-300"
+                                    }`}>
+                                      {dev.overpressure_calc.exceeds_2x ? "⚠ " : ""}
+                                      {dev.overpressure_calc.assumed_leak_size} leak
+                                      {" "}({dev.overpressure_calc.ratio.toFixed(2)}×)
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+
+                              {/* Cause */}
+                              <td
+                                rowSpan={catRows.length}
+                                className="px-3 py-2.5 border-r border-gray-200 align-top"
+                              >
                                 <ul className="space-y-1">
-                                  {dev.intermediate_consequences.map((item, ii) => (
-                                    <li key={ii} className="flex items-start gap-1.5 text-gray-700 leading-snug">
+                                  {dev.causes.map((cause, ci) => (
+                                    <li key={ci} className="flex items-start gap-1.5 text-gray-700 leading-snug">
                                       <span className="text-gray-300 flex-shrink-0 mt-0.5">•</span>
-                                      {item}
+                                      {cause}
                                     </li>
                                   ))}
                                 </ul>
+                              </td>
+
+                              {/* Drawing / Reference */}
+                              <td
+                                rowSpan={catRows.length}
+                                className="px-3 py-2.5 border-r border-gray-200 align-top"
+                              >
+                                {dev.drawing_references.length > 0 ? (
+                                  <span className="text-blue-700 font-medium">
+                                    {dev.drawing_references.join(", ")}
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-300 italic">—</span>
+                                )}
+                              </td>
+
+                              {/* Intermediate Consequences */}
+                              <td
+                                rowSpan={catRows.length}
+                                className="px-3 py-2.5 border-r border-gray-200 align-top cursor-pointer"
+                                onClick={() => { if (!isEditingInterm) openTableIntermEdit(devIdx); }}
+                              >
+                                {isEditingInterm ? (
+                                  <div className="space-y-1.5" onClick={(e) => e.stopPropagation()}>
+                                    <textarea
+                                      autoFocus
+                                      rows={5}
+                                      value={tableIntermEdit!.value}
+                                      onChange={(e) => setTableIntermEdit({ devIdx, value: e.target.value })}
+                                      className="w-full px-2 py-1 text-xs border border-blue-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none"
+                                      placeholder="One item per line…"
+                                    />
+                                    <div className="flex gap-1">
+                                      <button
+                                        onClick={saveTableIntermEdit}
+                                        className="text-[10px] px-2 py-0.5 bg-blue-500 text-white rounded hover:bg-blue-600"
+                                      >Save</button>
+                                      <button
+                                        onClick={() => setTableIntermEdit(null)}
+                                        className="text-[10px] px-2 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
+                                      >Cancel</button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="group relative">
+                                    {dev.intermediate_consequences.length > 0 ? (
+                                      <ul className="space-y-1">
+                                        {dev.intermediate_consequences.map((item, ii) => (
+                                          <li key={ii} className="flex items-start gap-1.5 text-gray-700 leading-snug">
+                                            <span className="text-gray-300 flex-shrink-0 mt-0.5">•</span>
+                                            {item}
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    ) : (
+                                      <span className="text-gray-300 italic">Click to add…</span>
+                                    )}
+                                    <span className="absolute top-0 right-0 opacity-0 group-hover:opacity-100 text-[10px] text-blue-400 bg-white px-1 rounded border border-blue-200 transition-opacity">
+                                      Edit
+                                    </span>
+                                  </div>
+                                )}
+                              </td>
+                            </>
+                          )}
+
+                          {/* ---- Per-category cells ---- */}
+
+                          {/* Cons. Cat */}
+                          <td className="px-3 py-2.5 border-r border-gray-200 align-top">
+                            <span className={`text-[11px] px-2 py-0.5 rounded border font-semibold ${catColors[row.category] ?? "bg-gray-100 text-gray-600 border-gray-300"}`}>
+                              {row.category}
+                            </span>
+                          </td>
+
+                          {/* Scenario Comments / Final Impacts — stacked blocks */}
+                          <td
+                            className="border-r border-gray-200 align-top cursor-pointer"
+                            onClick={() => { if (!isEditingCatRow) openCatRowEdit(devIdx, rowIdx); }}
+                          >
+                            {isEditingCatRow ? (
+                              <div className="p-2 space-y-2" onClick={(e) => e.stopPropagation()}>
+                                <div>
+                                  <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">
+                                    Final Impacts (one per line)
+                                  </div>
+                                  <textarea
+                                    autoFocus
+                                    rows={4}
+                                    value={tableCatRowEdit!.consequencesVal}
+                                    onChange={(e) => setTableCatRowEdit((prev) => prev ? { ...prev, consequencesVal: e.target.value } : null)}
+                                    className="w-full px-2 py-1 text-xs border border-blue-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none"
+                                    placeholder="One item per line…"
+                                  />
+                                </div>
+                                <div>
+                                  <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">
+                                    Scenario Comments
+                                  </div>
+                                  <textarea
+                                    rows={3}
+                                    value={tableCatRowEdit!.scenarioVal}
+                                    onChange={(e) => setTableCatRowEdit((prev) => prev ? { ...prev, scenarioVal: e.target.value } : null)}
+                                    className="w-full px-2 py-1 text-xs border border-blue-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none"
+                                    placeholder="Narrative description…"
+                                  />
+                                </div>
+                                <div className="flex gap-1">
+                                  <button
+                                    onClick={saveCatRowEdit}
+                                    className="text-[10px] px-2 py-0.5 bg-blue-500 text-white rounded hover:bg-blue-600"
+                                  >Save</button>
+                                  <button
+                                    onClick={() => setTableCatRowEdit(null)}
+                                    className="text-[10px] px-2 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
+                                  >Cancel</button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="group relative">
+                                {/* Stacked blocks — one per consequence */}
+                                {row.consequences.length > 0 || row.scenario_comments ? (
+                                  <div className="divide-y divide-gray-100">
+                                    {row.consequences.map((c, ci) => (
+                                      <div key={ci} className="px-3 py-2 text-xs text-gray-800 leading-snug">
+                                        {c}
+                                      </div>
+                                    ))}
+                                    {row.scenario_comments && (
+                                      <div className="px-3 py-2 text-xs text-gray-500 italic leading-snug">
+                                        {row.scenario_comments}
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div className="px-3 py-2 text-gray-300 italic text-xs">
+                                    Click to add…
+                                  </div>
+                                )}
+                                <span className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 text-[10px] text-blue-400 bg-white px-1 rounded border border-blue-200 transition-opacity">
+                                  Edit
+                                </span>
+                              </div>
+                            )}
+                          </td>
+
+                          {/* PEC — only for PAF row */}
+                          <td className="px-3 py-2.5 border-r border-gray-200 align-top">
+                            {row.category === "PAF" ? (
+                              isEditingPec ? (
+                                <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
+                                  {["PEC-1", "PEC-2", "PEC-3", "PEC-4"].map((p) => (
+                                    <button
+                                      key={p}
+                                      onClick={() => handleCatRowPecChange(devIdx, rowIdx, p)}
+                                      className="block w-full text-left text-[11px] px-2 py-0.5 rounded border border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 font-medium"
+                                    >
+                                      {p}
+                                    </button>
+                                  ))}
+                                  <button
+                                    onClick={() => setTableCatPecEdit(null)}
+                                    className="text-[10px] text-gray-400 hover:text-gray-600"
+                                  >Cancel</button>
+                                </div>
                               ) : (
-                                <span className="text-gray-300 italic">Click to add…</span>
-                              )}
-                              <span className="absolute top-0 right-0 opacity-0 group-hover:opacity-100 text-[10px] text-blue-400 bg-white px-1 rounded border border-blue-200 transition-opacity">
-                                Edit
-                              </span>
-                            </div>
-                          )}
-                        </td>
-
-                        {/* Consequence Category — click to change */}
-                        <td className="px-3 py-2.5 border-r border-gray-100">
-                          {isEditingCat ? (
-                            <div className="flex flex-col gap-1" onClick={(e) => e.stopPropagation()}>
-                              {["PAF", "PD/LOR", "ECR"].map((cat) => (
                                 <button
-                                  key={cat}
-                                  onClick={() => handleCategoryChange(idx, cat)}
-                                  className={`text-[11px] px-2 py-0.5 rounded border font-medium text-left ${catColors[cat] ?? ""} hover:opacity-80`}
-                                >
-                                  {cat}
-                                </button>
-                              ))}
-                              <button
-                                onClick={() => setTableEditingCategory(null)}
-                                className="text-[10px] text-gray-400 hover:text-gray-600 mt-0.5"
-                              >Cancel</button>
-                            </div>
-                          ) : (
-                            <button
-                              onClick={() => setTableEditingCategory(idx)}
-                              title="Click to change"
-                              className={`text-[11px] px-2 py-0.5 rounded border font-medium ${
-                                dev.consequence_category
-                                  ? (catColors[dev.consequence_category] ?? "bg-gray-100 text-gray-600 border-gray-300")
-                                  : "bg-gray-50 text-gray-400 border-dashed border-gray-300"
-                              } hover:opacity-80`}
-                            >
-                              {dev.consequence_category ?? "Set…"}
-                            </button>
-                          )}
-                          {dev.pec && (
-                            <div className="mt-1.5">
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300 font-medium">
-                                PEC: {dev.pec}
-                              </span>
-                            </div>
-                          )}
-                        </td>
-
-                        {/* PEC — click to edit */}
-                        <td className="px-3 py-2.5 border-r border-gray-100">
-                          {isEditingPec ? (
-                            <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
-                              {["PEC-1", "PEC-2", "PEC-3", "PEC-4"].map((p) => (
-                                <button
-                                  key={p}
-                                  onClick={() => handlePecChange(idx, p)}
-                                  className="block w-full text-left text-[11px] px-2 py-0.5 rounded border border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 font-medium"
-                                >
-                                  {p}
-                                </button>
-                              ))}
-                              <button
-                                onClick={() => setTableEditingPec(null)}
-                                className="text-[10px] text-gray-400 hover:text-gray-600 mt-0.5"
-                              >Cancel</button>
-                            </div>
-                          ) : (
-                            <button
-                              onClick={() => setTableEditingPec(idx)}
-                              title="Click to change PEC"
-                              className={`text-[11px] px-2 py-0.5 rounded border font-medium hover:opacity-80 ${
-                                dev.pec
-                                  ? "bg-purple-100 text-purple-700 border-purple-300"
-                                  : "bg-gray-50 text-gray-400 border-dashed border-gray-300"
-                              }`}
-                            >
-                              {dev.pec ?? "Set…"}
-                            </button>
-                          )}
-                        </td>
-
-                        {/* Current Risk — click to edit */}
-                        <td className="px-3 py-2.5 border-r border-gray-100">
-                          {isEditingCurrentRisk ? (
-                            <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
-                              {["C5", "D4", "D5", "E5", "B4", "C4"].map((r) => (
-                                <button
-                                  key={r}
-                                  onClick={() => handleCurrentRiskChange(idx, r)}
-                                  className={`block w-full text-left text-[11px] px-2 py-0.5 rounded border font-medium hover:opacity-80 ${
-                                    r.startsWith("E") ? "bg-red-100 text-red-700 border-red-300" :
-                                    r.startsWith("D") ? "bg-red-50 text-red-600 border-red-200" :
-                                    r.startsWith("C") ? "bg-amber-50 text-amber-700 border-amber-200" :
-                                    "bg-yellow-50 text-yellow-700 border-yellow-200"
+                                  onClick={() => setTableCatPecEdit({ devIdx, rowIdx })}
+                                  title="Click to change PEC"
+                                  className={`text-[11px] px-2 py-0.5 rounded border font-medium hover:opacity-80 ${
+                                    row.pec
+                                      ? "bg-purple-100 text-purple-700 border-purple-300"
+                                      : "bg-gray-50 text-gray-400 border-dashed border-gray-300"
                                   }`}
                                 >
-                                  {r}
+                                  {row.pec ?? "Set…"}
                                 </button>
-                              ))}
-                              <button
-                                onClick={() => setTableEditingCurrentRisk(null)}
-                                className="text-[10px] text-gray-400 hover:text-gray-600 mt-0.5"
-                              >Cancel</button>
-                            </div>
-                          ) : (
-                            <button
-                              onClick={() => setTableEditingCurrentRisk(idx)}
-                              title="Click to change current risk"
-                              className={`text-[11px] px-2 py-1 rounded border font-bold hover:opacity-80 ${
-                                !dev.current_risk
-                                  ? "bg-gray-50 text-gray-400 border-dashed border-gray-300"
-                                  : dev.current_risk.startsWith("E")
-                                  ? "bg-red-200 text-red-900 border-red-400"
-                                  : dev.current_risk.startsWith("D")
-                                  ? "bg-red-100 text-red-700 border-red-300"
-                                  : dev.current_risk.startsWith("C")
-                                  ? "bg-amber-100 text-amber-700 border-amber-300"
-                                  : "bg-yellow-50 text-yellow-700 border-yellow-200"
-                              }`}
-                            >
-                              {dev.current_risk ?? "Set…"}
-                            </button>
-                          )}
-                        </td>
+                              )
+                            ) : (
+                              <span className="text-gray-300 text-[11px]">—</span>
+                            )}
+                          </td>
 
-                        {/* Scenario Comments / Final Impacts — click to edit */}
-                        <td
-                          className="px-3 py-2.5 cursor-pointer"
-                          onClick={() => { if (!isEditingScenario) openTableScenarioEdit(idx); }}
-                        >
-                          {isEditingScenario ? (
-                            <div className="space-y-2" onClick={(e) => e.stopPropagation()}>
-                              <div>
-                                <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">Final Impacts (one per line)</div>
-                                <textarea
-                                  autoFocus
-                                  rows={4}
-                                  value={tableScenarioEdit!.consequencesVal}
-                                  onChange={(e) => setTableScenarioEdit((prev) => prev ? { ...prev, consequencesVal: e.target.value } : null)}
-                                  className="w-full px-2 py-1 text-xs border border-blue-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none"
-                                  placeholder="One consequence per line…"
-                                />
-                              </div>
-                              <div>
-                                <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">Scenario Comments</div>
-                                <textarea
-                                  rows={3}
-                                  value={tableScenarioEdit!.scenarioVal}
-                                  onChange={(e) => setTableScenarioEdit((prev) => prev ? { ...prev, scenarioVal: e.target.value } : null)}
-                                  className="w-full px-2 py-1 text-xs border border-blue-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none"
-                                  placeholder="Narrative description…"
-                                />
-                              </div>
-                              <div className="flex gap-1">
+                          {/* Current Risk */}
+                          <td className="px-3 py-2.5 align-top">
+                            {isEditingRisk ? (
+                              <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
+                                {["C5", "D4", "D5", "E5", "B4", "C4", "4", "3", "2", "1"].map((r) => (
+                                  <button
+                                    key={r}
+                                    onClick={() => handleCatRowRiskChange(devIdx, rowIdx, r)}
+                                    className={`block w-full text-left text-[11px] px-2 py-0.5 rounded border font-medium hover:opacity-80 ${
+                                      r.startsWith("E") || r === "5"
+                                        ? "bg-red-100 text-red-700 border-red-300"
+                                        : r.startsWith("D") || r === "4"
+                                        ? "bg-red-50 text-red-600 border-red-200"
+                                        : r.startsWith("C") || r === "3"
+                                        ? "bg-amber-50 text-amber-700 border-amber-200"
+                                        : "bg-yellow-50 text-yellow-700 border-yellow-200"
+                                    }`}
+                                  >
+                                    {r}
+                                  </button>
+                                ))}
                                 <button
-                                  onClick={saveTableScenarioEdit}
-                                  className="text-[10px] px-2 py-0.5 bg-blue-500 text-white rounded hover:bg-blue-600"
-                                >Save</button>
-                                <button
-                                  onClick={() => setTableScenarioEdit(null)}
-                                  className="text-[10px] px-2 py-0.5 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
+                                  onClick={() => setTableCatRiskEdit(null)}
+                                  className="text-[10px] text-gray-400 hover:text-gray-600"
                                 >Cancel</button>
                               </div>
-                            </div>
-                          ) : (
-                            <div className="group relative space-y-2">
-                              {/* Final consequences */}
-                              {dev.consequences.length > 0 && (
-                                <ul className="space-y-1">
-                                  {dev.consequences.map((c, ci) => (
-                                    <li key={ci} className="flex items-start gap-1.5 text-gray-800 font-medium leading-snug">
-                                      <span className="text-gray-400 flex-shrink-0 mt-0.5">▸</span>
-                                      {c}
-                                    </li>
-                                  ))}
-                                </ul>
-                              )}
-                              {/* Scenario comments */}
-                              {dev.scenario_comments ? (
-                                <p className="text-gray-500 italic leading-relaxed text-[11px] border-t border-gray-100 pt-1.5">
-                                  {dev.scenario_comments}
-                                </p>
-                              ) : (
-                                dev.consequences.length === 0 && (
-                                  <span className="text-gray-300 italic">Click to add…</span>
-                                )
-                              )}
-                              <span className="absolute top-0 right-0 opacity-0 group-hover:opacity-100 text-[10px] text-blue-400 bg-white px-1 rounded border border-blue-200 transition-opacity">
-                                Edit
-                              </span>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
+                            ) : (
+                              <button
+                                onClick={() => setTableCatRiskEdit({ devIdx, rowIdx })}
+                                title="Click to change current risk"
+                                className={`text-[11px] px-2 py-1 rounded border font-bold hover:opacity-80 ${riskColorCls}`}
+                              >
+                                {row.current_risk ?? "Set…"}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    });
                   })}
                 </tbody>
               </table>
             </div>
           </div>
 
-          {/* Approval Section */}
           <ApprovalSection
             smeName={smeName}
             comments={comments}
@@ -791,7 +857,7 @@ export default function ConsequenceReviewTable({
 }
 
 // ---------------------------------------------------------------------------
-// ApprovalSection — shared between card and table views
+// ApprovalSection
 // ---------------------------------------------------------------------------
 
 function ApprovalSection({
@@ -857,7 +923,6 @@ function ApprovalSection({
 // ---------------------------------------------------------------------------
 
 function OverpressureBadge({ calc }: { calc: OverpressureCalc }) {
-  // Colour: vessel rupture → amber, any leak size → yellow, no LOPC → gray
   const hasLeak = !!calc.assumed_leak_size;
   const containerCls = calc.exceeds_2x
     ? "bg-amber-50 border border-amber-300"
@@ -877,7 +942,6 @@ function OverpressureBadge({ calc }: { calc: OverpressureCalc }) {
 
   return (
     <div className={`rounded-md p-3 text-xs space-y-1.5 ${containerCls}`}>
-      {/* Ratio line */}
       <div className="flex items-center gap-2 font-semibold flex-wrap">
         <span className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${labelCls}`}>
           {label}
@@ -886,13 +950,9 @@ function OverpressureBadge({ calc }: { calc: OverpressureCalc }) {
           {calc.max_credible_pressure} PSIG ÷ {calc.design_pressure} PSIG (design) = {calc.ratio.toFixed(2)}×
         </span>
       </div>
-
-      {/* Significance from knowledge document */}
       {calc.significance && (
         <div className="text-gray-600">{calc.significance}</div>
       )}
-
-      {/* Consequence description + hole size from knowledge document */}
       {calc.consequence_description && (
         <div className={`font-medium ${calc.exceeds_2x ? "text-amber-800" : "text-yellow-800"}`}>
           {calc.consequence_description}
@@ -901,8 +961,6 @@ function OverpressureBadge({ calc }: { calc: OverpressureCalc }) {
           )}
         </div>
       )}
-
-      {/* Source reference */}
       {calc.source && (
         <div className="text-gray-400 italic text-[10px]">Source: {calc.source}</div>
       )}
@@ -911,23 +969,14 @@ function OverpressureBadge({ calc }: { calc: OverpressureCalc }) {
 }
 
 // ---------------------------------------------------------------------------
-// EditableList — reusable inline-editable list (card view)
+// EditableList — card view
 // ---------------------------------------------------------------------------
 
 function EditableList({
-  items,
-  devIdx,
-  field,
-  editTarget,
-  editText,
-  newItemText,
-  onDelete,
-  onStartEdit,
-  onSaveEdit,
-  onCancelEdit,
-  onEditTextChange,
-  onAddItem,
-  onNewItemChange,
+  items, devIdx, field,
+  editTarget, editText, newItemText,
+  onDelete, onStartEdit, onSaveEdit, onCancelEdit, onEditTextChange,
+  onAddItem, onNewItemChange,
 }: {
   items: string[];
   devIdx: number;
@@ -976,7 +1025,6 @@ function EditableList({
           </div>
         );
       })}
-      {/* Add new item */}
       <div className="flex gap-1.5 mt-1">
         <input
           type="text"
@@ -995,7 +1043,7 @@ function EditableList({
 }
 
 // ---------------------------------------------------------------------------
-// DeviationConsequenceCard (card view)
+// DeviationConsequenceCard — card view
 // ---------------------------------------------------------------------------
 
 function DeviationConsequenceCard({
@@ -1034,7 +1082,6 @@ function DeviationConsequenceCard({
 
   return (
     <div className="p-4 space-y-4">
-      {/* Deviation header */}
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-xs font-mono bg-gray-100 px-2 py-0.5 rounded text-gray-600">{dev.guideword}</span>
         <span className="text-sm font-semibold text-gray-900">{dev.deviation}</span>
@@ -1078,12 +1125,8 @@ function DeviationConsequenceCard({
         )}
       </div>
 
-      {/* Overpressure calculation badge */}
-      {dev.overpressure_calc && (
-        <OverpressureBadge calc={dev.overpressure_calc} />
-      )}
+      {dev.overpressure_calc && <OverpressureBadge calc={dev.overpressure_calc} />}
 
-      {/* Intermediate Consequences */}
       <div>
         <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
           Intermediate Consequences
@@ -1105,7 +1148,6 @@ function DeviationConsequenceCard({
         />
       </div>
 
-      {/* Final Consequences */}
       <div>
         <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
           Final Consequences / Worst Credible Outcomes
@@ -1128,7 +1170,6 @@ function DeviationConsequenceCard({
         />
       </div>
 
-      {/* Scenario Comments */}
       <div>
         <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
           Scenario Comments / Final Impact Narrative

@@ -26,7 +26,7 @@ from typing import Optional
 from app.services.openai_service import openai_service
 from app.services.knowledge_service import knowledge_service
 from app.models.pid_models import PIDNode, Equipment
-from app.models.api_models import DeviationConsequencesItem, OverpressureCalc
+from app.models.api_models import DeviationConsequencesItem, OverpressureCalc, CategoryRowItem
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -153,6 +153,7 @@ class ReasoningResult:
     triggered_safeguards: list[dict] = field(default_factory=list)
     reasoning_trace: list[str] = field(default_factory=list)
     calculation_result: Optional[dict] = None
+    category_rows: list[dict] = field(default_factory=list)  # Per-category PAF/PD/LOR/ECR rows
 
 
 @dataclass
@@ -438,6 +439,7 @@ class ConsequenceAgent:
                 triggered_safeguards=result.get("triggered_safeguards", []),
                 reasoning_trace=result.get("reasoning_trace", []),
                 calculation_result=result.get("calculation_result"),
+                category_rows=result.get("category_rows", []),
             )
 
         except Exception as e:
@@ -549,8 +551,13 @@ Using ONLY the knowledge documents above, determine:
 
 1. For EACH approved cause, find the corresponding consequences in the knowledge
 2. Build the consequence chain: cause → intermediate effects → final impacts
-3. Determine PEC and consequence category from the tables
+3. Populate all 3 consequence category rows (PAF, PD/LOR, ECR) from the knowledge
 4. Identify any triggered safeguards based on consequence type
+
+Consequence category definitions:
+- PAF (Potential to Affect People): personnel injury, fatality, fire, explosion, toxic release
+- PD/LOR (Property Damage / Loss of Revenue): equipment damage, production downtime, economic loss
+- ECR (Environmental / Community / Regulatory): environmental release, spill, regulatory impact
 
 ## OUTPUT FORMAT
 Return JSON:
@@ -573,12 +580,32 @@ Return JSON:
         "Combined intermediate effect 1",
         "Combined intermediate effect 2"
     ],
-    "consequences": [
-        "Combined final consequence 1 (worst credible, no safeguards)",
-        "Combined final consequence 2"
+    "category_rows": [
+        {
+            "category": "PAF",
+            "consequences": ["Loss of primary containment...", "Jet fire, flash fire..."],
+            "scenario_comments": "Narrative for PAF scenario citing knowledge sources",
+            "pec": "PEC-1 (from PEC table lookup)",
+            "current_risk": "C5 (from risk table)"
+        },
+        {
+            "category": "PD/LOR",
+            "consequences": ["Downtime of approximately X to X months if specific value not in knowledge, or actual value if found"],
+            "scenario_comments": "Narrative for production/property loss if found in knowledge, else null",
+            "pec": null,
+            "current_risk": null
+        },
+        {
+            "category": "ECR",
+            "consequences": ["Environmental consequence from knowledge if found, else leave empty array"],
+            "scenario_comments": null,
+            "pec": null,
+            "current_risk": null
+        }
     ],
-    "scenario_comments": "Narrative: cause → intermediate → final (cite knowledge sources)",
-    "consequence_category": "PAF or PD/LOR or ECR",
+    "consequences": ["Same as PAF consequences — for backward compatibility"],
+    "scenario_comments": "Overall narrative",
+    "consequence_category": "PAF",
     "pec": "PEC-1 or PEC-2 etc (from table lookup)",
     "current_risk": "C5 or D4 etc (from table)",
     "calculation_result": {
@@ -598,6 +625,8 @@ Return JSON:
 5. If LOC/leak scenario: include gas detection in triggered_safeguards
 6. If fire scenario: include deluge in triggered_safeguards
 7. Do NOT invent consequences - use only what's in the knowledge
+8. For PD/LOR: if no specific downtime value in knowledge, use "Downtime of approximately X to X months" as placeholder
+9. For ECR: if no environmental consequence in knowledge, return empty array for consequences
 """
 
         return prompt
@@ -739,6 +768,35 @@ You are NOT allowed to:
         if sources:
             scenario_comments += f"\n\nKnowledge Sources: {', '.join(sources[:5])}"
 
+        # Build per-category rows
+        if reasoning.category_rows:
+            category_rows = [
+                CategoryRowItem(
+                    category=row.get("category", "PAF"),
+                    consequences=row.get("consequences", []),
+                    scenario_comments=row.get("scenario_comments"),
+                    current_risk=row.get("current_risk"),
+                    pec=row.get("pec"),
+                )
+                for row in reasoning.category_rows
+            ]
+        else:
+            # Fallback: put all AI consequences in PAF, templates for PD/LOR and ECR
+            category_rows = [
+                CategoryRowItem(
+                    category="PAF",
+                    consequences=reasoning.combined_final,
+                    scenario_comments=reasoning.scenario_comments,
+                    pec=reasoning.pec,
+                    current_risk=reasoning.current_risk,
+                ),
+                CategoryRowItem(
+                    category="PD/LOR",
+                    consequences=["Downtime of approximately X to X months"],
+                ),
+                CategoryRowItem(category="ECR"),
+            ]
+
         return DeviationConsequencesItem(
             deviation_id=context.deviation_id,
             equipment_tag=context.equipment_tag,
@@ -754,6 +812,7 @@ You are NOT allowed to:
             pec=reasoning.pec,
             current_risk=reasoning.current_risk,
             overpressure_calc=overpressure_calc,
+            category_rows=category_rows,
         )
 
     # -------------------------------------------------------------------------

@@ -213,6 +213,15 @@ class OverpressureCalc(BaseModel):
     source: Optional[str]                  # document + page reference
 
 
+class CategoryRowItem(BaseModel):
+    """Per-category consequence row (PAF / PD/LOR / ECR) — frontend display row."""
+    category: str                                # "PAF", "PD/LOR", or "ECR"
+    consequences: list[str] = Field(default_factory=list)
+    scenario_comments: Optional[str] = None
+    current_risk: Optional[str] = None
+    pec: Optional[str] = None                   # Only applicable for PAF
+
+
 class DeviationConsequencesItem(BaseModel):
     """Consequences for a single deviation, used in consequence review step."""
     deviation_id: str
@@ -229,6 +238,7 @@ class DeviationConsequencesItem(BaseModel):
     pec: Optional[str] = None                    # PEC number from table, e.g. "PEC-1", "PEC-2"
     current_risk: Optional[str] = None           # Current risk level e.g. "C5" (PEC-1 → C5)
     overpressure_calc: Optional[OverpressureCalc] = None
+    category_rows: list[CategoryRowItem] = Field(default_factory=list)  # Per-category rows for table view
 
 
 class GenerateConsequencesRequest(BaseModel):
