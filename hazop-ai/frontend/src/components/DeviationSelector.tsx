@@ -158,7 +158,7 @@ type ClassificationTab = "cause" | "safeguard";
 
 export default function DeviationSelector({ onSubmit, onBack, node, initialConfig }: DeviationSelectorProps) {
   const [deviationTypes, setDeviationTypes] = useState<string[]>(STANDARD_DEVIATION_TYPES);
-  const [selected, setSelected] = useState<Set<string>>(new Set(STANDARD_DEVIATION_TYPES));
+  const [selected, setSelected] = useState<Set<string>>(new Set<string>());
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<ClassificationTab>("cause");
 
@@ -167,6 +167,30 @@ export default function DeviationSelector({ onSubmit, onBack, node, initialConfi
     () => node.instruments.some(inst => getTagPrefix(inst.tag) === "BDV"),
     [node.instruments],
   );
+
+  // Suggested deviations from Claude's P&ID analysis
+  const suggestedDeviationSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const loc of node.deviation_locations ?? []) {
+      for (const dev of loc.susceptible_deviations) s.add(dev);
+    }
+    return s;
+  }, [node.deviation_locations]);
+
+  // Per-deviation equipment context: deviation → [{tag, description}]
+  const deviationContext = useMemo(() => {
+    const map = new Map<string, { tag: string; description: string }[]>();
+    for (const loc of node.deviation_locations ?? []) {
+      for (const dev of loc.susceptible_deviations) {
+        if (!map.has(dev)) map.set(dev, []);
+        map.get(dev)!.push({
+          tag: loc.equipment_tag,
+          description: loc.location_description ?? "",
+        });
+      }
+    }
+    return map;
+  }, [node.deviation_locations]);
 
   // Build default classification for all instruments
   const defaultConfig = useMemo<InstrumentClassificationConfig>(() => {
@@ -213,13 +237,18 @@ export default function DeviationSelector({ onSubmit, onBack, node, initialConfi
     getDeviationTypes()
       .then((data) => {
         setDeviationTypes(data.deviation_types);
-        setSelected(new Set(data.deviation_types));
+        // Pre-select AI-suggested types if available; fall back to all selected
+        if (suggestedDeviationSet.size > 0) {
+          setSelected(new Set(data.deviation_types.filter(t => suggestedDeviationSet.has(t))));
+        } else {
+          setSelected(new Set(data.deviation_types));
+        }
       })
       .catch(() => {
         // Fallback to frontend constant
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [suggestedDeviationSet]);
 
   const toggleType = (typeName: string) => {
     setSelected((prev) => {
@@ -235,6 +264,11 @@ export default function DeviationSelector({ onSubmit, onBack, node, initialConfi
 
   const selectAll = () => setSelected(new Set(deviationTypes));
   const selectNone = () => setSelected(new Set());
+  const selectSuggested = () => {
+    if (suggestedDeviationSet.size > 0) {
+      setSelected(new Set(deviationTypes.filter(t => suggestedDeviationSet.has(t))));
+    }
+  };
 
   // Instrument move handlers
   const moveToExcluded = (tag: string, context: ClassificationTab) => {
@@ -357,6 +391,17 @@ export default function DeviationSelector({ onSubmit, onBack, node, initialConfi
             >
               Clear All
             </button>
+            {suggestedDeviationSet.size > 0 && (
+              <>
+                <span className="text-gray-300">|</span>
+                <button
+                  onClick={selectSuggested}
+                  className="text-xs text-purple-600 hover:text-purple-800 font-medium"
+                >
+                  ✦ AI Suggestions ({suggestedDeviationSet.size})
+                </button>
+              </>
+            )}
             <span className="ml-auto text-xs text-gray-500">
               {selected.size} of {deviationTypes.length} selected
             </span>
@@ -367,25 +412,47 @@ export default function DeviationSelector({ onSubmit, onBack, node, initialConfi
             {deviationTypes.map((typeName, index) => (
               <label
                 key={typeName}
-                className={`flex items-center gap-2 p-2.5 rounded border cursor-pointer transition-colors ${
+                className={`flex flex-col gap-1 p-2.5 rounded border cursor-pointer transition-colors ${
                   selected.has(typeName)
                     ? "border-blue-200 bg-blue-50/50"
                     : "border-gray-100 bg-gray-50/30 hover:bg-gray-50"
                 }`}
               >
-                <input
-                  type="checkbox"
-                  checked={selected.has(typeName)}
-                  onChange={() => toggleType(typeName)}
-                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                />
-                <span className="text-sm text-gray-800">
-                  {index + 1}. {typeName}
-                </span>
-                {AI_CATEGORIES.has(typeName) && (
-                  <span className="ml-auto px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 text-amber-700 rounded whitespace-nowrap">
-                    AI Draft - SME Review Required
+                {/* Row 1: checkbox + name + badges */}
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(typeName)}
+                    onChange={() => toggleType(typeName)}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-sm text-gray-800">
+                    {index + 1}. {typeName}
                   </span>
+                  {AI_CATEGORIES.has(typeName) ? (
+                    <span className="ml-auto px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 text-amber-700 rounded whitespace-nowrap">
+                      AI Draft - SME Review Required
+                    </span>
+                  ) : suggestedDeviationSet.has(typeName) ? (
+                    <span className="ml-auto px-1.5 py-0.5 text-[10px] font-medium bg-purple-100 text-purple-700 rounded whitespace-nowrap">
+                      ✦ AI
+                    </span>
+                  ) : null}
+                </div>
+
+                {/* Row 2: applicable equipment chips (only when AI suggests this deviation) */}
+                {deviationContext.has(typeName) && (
+                  <div className="flex flex-wrap gap-1 pl-5">
+                    {deviationContext.get(typeName)!.map(({ tag, description }) => (
+                      <span
+                        key={tag}
+                        title={description}
+                        className="inline-flex items-center px-1.5 py-0.5 text-[10px] bg-gray-100 text-gray-600 rounded border border-gray-200"
+                      >
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
                 )}
               </label>
             ))}
