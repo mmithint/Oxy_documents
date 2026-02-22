@@ -200,8 +200,7 @@ OCR Text:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.1,
-                max_tokens=8000,
+                max_completion_tokens=8000,
                 response_format={"type": "json_object"},
             )
 
@@ -393,8 +392,7 @@ DXF Text Entities (grouped by CAD layer, with x/y coordinates):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.1,
-                max_tokens=8000,
+                max_completion_tokens=8000,
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content
@@ -584,8 +582,7 @@ Rules:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": content},
                 ],
-                temperature=0.1,
-                max_tokens=8000,
+                max_completion_tokens=8000,
                 response_format={"type": "json_object"},
             )
 
@@ -668,9 +665,8 @@ Rules:
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.2,
-            max_tokens=6000,
+                ],
+                max_completion_tokens=6000,
             response_format={"type": "json_object"},
         )
 
@@ -778,9 +774,8 @@ Rules:
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-            max_tokens=6000,
+                ],
+                max_completion_tokens=6000,
             response_format={"type": "json_object"},
         )
 
@@ -1045,8 +1040,7 @@ Rules:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.1,
-                max_tokens=4000,
+                max_completion_tokens=4000,
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content or "{}"
@@ -1247,9 +1241,8 @@ Rules:
             model=settings.AZURE_OPENAI_DEPLOYMENT,
             messages=[
                 {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-            max_tokens=2000,
+                ],
+                max_completion_tokens=2000,
             response_format={"type": "json_object"},
         )
 
@@ -1323,8 +1316,7 @@ This is safety-critical. Over-estimation is safer than under-estimation.
             messages=[
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.1,  # Very low temperature for consistent severity estimates
-            max_tokens=2000,
+            max_completion_tokens=2000,
             response_format={"type": "json_object"},
         )
 

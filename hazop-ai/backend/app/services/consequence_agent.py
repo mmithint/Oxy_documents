@@ -409,8 +409,7 @@ class ConsequenceAgent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.2,
-                max_tokens=8000,
+                max_completion_tokens=8000,
                 response_format={"type": "json_object"},
             )
 
