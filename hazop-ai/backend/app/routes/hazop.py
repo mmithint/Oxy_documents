@@ -30,7 +30,7 @@ from app.models.api_models import (
 from app.services.hazop_generator import hazop_generator, hazop_generator_offline
 from app.services.deviation_generator import deviation_generator
 from app.services.risk_engine import risk_engine, RISK_LEVEL_DEFINITIONS
-from app.services.openai_service import openai_service
+from app.services.claude_service import claude_service
 from app.services.knowledge_service import knowledge_service
 from app.services.mitigation_agent import mitigation_agent
 from app.database.cosmos_client import cosmos_client
@@ -445,7 +445,7 @@ async def generate_causes(request: GenerateCausesRequest):
                 ))
                 continue
 
-            result = await openai_service.generate_deviation_content(
+            result = await claude_service.generate_deviation_content(
                 equipment_type=equipment_type,
                 equipment_tag=dev.equipment_tag,
                 deviation=dev.deviation,

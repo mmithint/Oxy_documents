@@ -32,7 +32,7 @@ from app.models.pid_models import (
     PIDExtractionResult,
     LineConnection, ControlLoop, DeviationLocation,
 )
-from app.services.openai_service import openai_service
+from app.services.claude_service import claude_service
 from app.services.dxf_extractor import (
     extract_entities_from_dxf,
     format_entities_for_llm,
@@ -140,37 +140,6 @@ class DocumentIntelligenceService:
             )
         return self._client
 
-    async def prepare_pid_inputs(
-        self,
-        file_content: bytes,
-        source_filename: str,
-    ) -> dict:
-        """
-        Run OCR + image conversion only — no LLM call.
-
-        Returns OCR chunks and page images ready to pass to any LLM.
-        Called by the /pid/compare route so both GPT and Claude share
-        the same OCR output.
-        """
-        # Azure Document Intelligence OCR
-        poller = self.client.begin_analyze_document(
-            model_id="prebuilt-layout",
-            body=AnalyzeDocumentRequest(bytes_source=file_content),
-        )
-        result = poller.result()
-        raw_text = self._extract_full_text(result)
-        chunks = self._chunk_ocr_text(raw_text, chunk_size=1000, overlap=100)
-
-        # PDF → PNG images for vision
-        content_type = self._guess_content_type(source_filename)
-        images_base64 = self._convert_to_images(file_content, content_type)
-
-        return {
-            "chunks": chunks,
-            "images_base64": images_base64,
-            "raw_text": raw_text,
-        }
-
     async def parse_pid(
         self,
         file_content: bytes,
@@ -206,8 +175,8 @@ class DocumentIntelligenceService:
         use_llm = True
 
         try:
-            llm_result = await openai_service.extract_pid_data(chunks, source_filename)
-            print(f"[P&ID LLM] Text extraction complete for {source_filename}")
+            llm_result = await claude_service.extract_pid_data(chunks, source_filename)
+            print(f"[P&ID Claude] Text extraction complete for {source_filename}")
         except Exception as e:
             print(f"[P&ID LLM] Text extraction failed: {e}")
             use_llm = False
@@ -250,8 +219,8 @@ class DocumentIntelligenceService:
             )
 
             if images_base64:
-                print(f"[P&ID Vision] Sending {len(images_base64)} page(s) to GPT-4 Vision...")
-                vision_result = await openai_service.extract_pid_data_with_vision(
+                print(f"[P&ID Claude Vision] Sending {len(images_base64)} page(s) to Claude Vision...")
+                vision_result = await claude_service.extract_pid_data_with_vision(
                     images_base64=images_base64,
                     source_filename=source_filename,
                     ocr_hint=raw_text[:3000] if raw_text else None,
@@ -406,7 +375,7 @@ class DocumentIntelligenceService:
         # ---- Step 2: LLM extraction from DXF entities ----
         llm_result: dict | None = None
         try:
-            llm_result = await openai_service.extract_pid_from_dxf_entities(
+            llm_result = await claude_service.extract_pid_from_dxf_entities(
                 entity_text=entity_text,
                 source_filename=source_filename,
             )

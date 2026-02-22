@@ -23,7 +23,7 @@ Knowledge Sources:
 import json
 from dataclasses import dataclass, field
 from typing import Optional
-from app.services.openai_service import openai_service
+from app.services.claude_service import claude_service
 from app.services.knowledge_service import knowledge_service
 from app.models.pid_models import PIDNode, Equipment
 from app.models.api_models import DeviationConsequencesItem, OverpressureCalc, CategoryRowItem
@@ -179,7 +179,6 @@ class ConsequenceAgent:
     """
 
     def __init__(self):
-        self.openai = openai_service
         self.knowledge = knowledge_service
 
     # -------------------------------------------------------------------------
@@ -403,19 +402,12 @@ class ConsequenceAgent:
         system_prompt = self._get_reasoning_system_prompt()
 
         try:
-            response = self.openai.client.chat.completions.create(
-                model=settings.AZURE_OPENAI_DEPLOYMENT,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.2,
+            result = await claude_service.call_llm_json(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
                 max_tokens=4000,
-                response_format={"type": "json_object"},
+                temperature=0.2,
             )
-
-            content = response.choices[0].message.content
-            result = json.loads(content)
 
             # Parse cause mappings
             cause_mappings = []

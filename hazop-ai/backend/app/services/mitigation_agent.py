@@ -23,7 +23,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import Optional
-from app.services.openai_service import openai_service
+from app.services.claude_service import claude_service
 from app.services.knowledge_service import knowledge_service
 from app.models.pid_models import PIDNode, Equipment
 from app.models.api_models import DeviationSafeguardsItem, SafeguardReviewItem
@@ -151,7 +151,6 @@ class MitigationAgent:
     """
 
     def __init__(self):
-        self.openai = openai_service
         self.knowledge = knowledge_service
 
     # -------------------------------------------------------------------------
@@ -358,19 +357,12 @@ class MitigationAgent:
         user_prompt = self._build_reasoning_prompt(context, knowledge)
 
         try:
-            response = self.openai.client.chat.completions.create(
-                model=settings.AZURE_OPENAI_DEPLOYMENT,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.1,
+            result = await claude_service.call_llm_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
                 max_tokens=3000,
-                response_format={"type": "json_object"},
+                temperature=0.1,
             )
-
-            content = response.choices[0].message.content
-            result = json.loads(content)
 
             return SafeguardReasoningResult(
                 safeguards=result.get("safeguards", []),

@@ -14,7 +14,6 @@ import type {
   ConsequenceGenerationResponse,
   DeviationSafeguards,
   SafeguardsGenerationResponse,
-  ExtractionCompareResponse,
 } from "../types/hazop";
 
 const api = axios.create({
@@ -43,15 +42,6 @@ export async function uploadPID(file: File, nodeId?: string): Promise<UploadResp
   if (nodeId) formData.append("node_id", nodeId);
 
   const res = await api.post<UploadResponse>("/upload/pid", formData, {
-    headers: { "Content-Type": "multipart/form-data" },
-  });
-  return res.data;
-}
-
-export async function comparePIDExtraction(file: File): Promise<ExtractionCompareResponse> {
-  const formData = new FormData();
-  formData.append("file", file);
-  const res = await api.post<ExtractionCompareResponse>("/upload/pid/compare", formData, {
     headers: { "Content-Type": "multipart/form-data" },
   });
   return res.data;

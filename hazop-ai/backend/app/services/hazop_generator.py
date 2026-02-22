@@ -36,7 +36,7 @@ from app.models.hazop_models import (
 )
 from app.services.deviation_generator import deviation_generator
 from app.services.risk_engine import risk_engine
-from app.services.openai_service import openai_service
+from app.services.claude_service import claude_service
 from app.services.knowledge_service import knowledge_service
 from app.database.cosmos_client import cosmos_client
 
@@ -293,7 +293,7 @@ class HAZOPGeneratorService:
                     for eq in node.equipment
                 ]
 
-            result = await openai_service.generate_deviation_content(
+            result = await claude_service.generate_deviation_content(
                 equipment_type=equipment_type,
                 equipment_tag=deviation.equipment_tag,
                 deviation=deviation.deviation,
@@ -403,7 +403,7 @@ class HAZOPGeneratorService:
     ) -> dict | None:
         """Get LLM severity estimation for PAF, PD/LOR, ECR."""
         try:
-            result = await openai_service.estimate_consequence_severity(
+            result = await claude_service.estimate_consequence_severity(
                 equipment_type=equipment_type,
                 deviation=deviation.deviation,
                 consequences=deviation.consequences,
@@ -462,7 +462,7 @@ class HAZOPGeneratorService:
             highest_risk = risk_engine.get_highest_risk_level(deviation.risk)
             safeguard_descriptions = [sg.description for sg in deviation.safeguards]
 
-            recommendations = await openai_service.generate_recommendations(
+            recommendations = await claude_service.generate_recommendations(
                 deviation=deviation.deviation,
                 consequences=deviation.consequences,
                 risk_level=highest_risk or "C",
