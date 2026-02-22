@@ -459,17 +459,21 @@ async def generate_consequences(request: GenerateConsequencesRequest):
     """
     Generate consequence content for each deviation for SME review.
 
-    This runs AFTER cause approval (approve-causes) and BEFORE full HAZOP generation.
-    It uses:
-      - SME-approved causes (from node_data["approved_causes"])
-      - Equipment design pressure + upstream_pressure_psig for overpressure calculation
-      - RAG knowledge context (consequence docs, HSE Risk Assessment, Production Deck table)
-      - LLM to generate intermediate consequences, final consequences, scenario comments,
-        consequence category, PEC, and triggered safeguards (LOC → gas detection,
-        Jet Fire → deluge)
+    Uses the ConsequenceAgent for knowledge-driven multi-step reasoning:
+      Step 1: RETRIEVE  — Smart retrieval based on causes + deviation + equipment
+      Step 2: REASON    — LLM extracts consequences from retrieved knowledge
+      Step 3: VALIDATE  — Ensure consequences are grounded in knowledge
+      Step 4: OUTPUT    — Return structured DeviationConsequencesItem
+
+    All consequences are derived from knowledge documents:
+      - 60 400 301 07 Consequence Development Guideline
+      - production-deck-paf-consequence.xlsx
 
     The generated consequences are stored for SME review before HAZOP generation.
     """
+    from app.services.consequence_agent import consequence_agent
+    from app.services.safeguard_classifier import match_safeguards_to_equipment
+
     node_data = await cosmos_client.get_node(request.node_id)
     if not node_data:
         raise HTTPException(
@@ -481,8 +485,7 @@ async def generate_consequences(request: GenerateConsequencesRequest):
     approved_causes = node_data.get("approved_causes", {})
     deviation_consequences_list: list[DeviationConsequencesItem] = []
 
-    # Rebuild the list of deviations from approved_causes (same key structure)
-    from app.services.deviation_generator import deviation_generator
+    # Rebuild the list of deviations from approved_causes
     deviations = deviation_generator.generate_deviations_for_node(
         node, selected_deviation_types=request.selected_deviation_types
     )
@@ -495,10 +498,9 @@ async def generate_consequences(request: GenerateConsequencesRequest):
                 equipment = eq
                 break
 
-        equipment_type = equipment.equipment_type if equipment else "Unknown"
-        design_pressure = equipment.design_pressure if equipment else None
-        operating_pressure = equipment.operating_pressure if equipment else None
-        design_temperature = equipment.design_temperature if equipment else None
+        if not equipment:
+            # Skip deviations without equipment
+            continue
 
         # Get approved causes for this deviation (match by equipment_tag + deviation)
         causes: list[str] = []
@@ -507,120 +509,34 @@ async def generate_consequences(request: GenerateConsequencesRequest):
                     and adata.get("deviation") == dev.deviation):
                 causes = adata.get("causes", [])
                 break
+
         if not causes:
-            causes = []  # no fallback to ontology causes
+            # No approved causes - skip this deviation
+            continue
 
-        # Calculate pressure ratio (pure math) — thresholds and hole sizes come from RAG
-        pressure_ratio: float | None = None
-        overpressure_table_context = ""
-        if (dev.guideword.value == "HIGH"
-                and dev.parameter.value == "PRESSURE"
-                and design_pressure
-                and node.upstream_pressure_psig):
-            pressure_ratio = round(node.upstream_pressure_psig / design_pressure, 2)
-            # Retrieve the pressure significance / hole size table from knowledge documents
-            try:
-                overpressure_table_context = await knowledge_service.retrieve_overpressure_table_context()
-            except Exception:
-                pass
+        # Gather P&ID instruments for this equipment
+        pid_instruments: list[dict] = match_safeguards_to_equipment(
+            equipment=equipment,
+            instruments=node.instruments,
+        )
 
-        # RAG: retrieve PEC table (production-deck PAF consequence) for all deviations
-        pec_table_context = ""
+        # Use ConsequenceAgent for knowledge-driven consequence generation
         try:
-            pec_table_context = await knowledge_service.retrieve_pec_table_context()
-        except Exception:
-            pass
-
-        # RAG: retrieve consequence knowledge context
-        knowledge_context = ""
-        try:
-            knowledge_context = await knowledge_service.retrieve_full_hazop_context(
-                equipment_type=equipment_type,
-                deviation=dev.deviation,
-                limit=5,
-            )
-        except Exception:
-            pass
-
-        # Gather all P&ID instruments matched to this equipment for consequence context
-        from app.services.safeguard_classifier import match_safeguards_to_equipment
-        pid_instruments: list[dict] = []
-        if equipment:
-            pid_instruments = match_safeguards_to_equipment(
-                equipment=equipment,
-                instruments=node.instruments,
-            )
-
-        # LLM: generate consequence content
-        try:
-            result = await openai_service.generate_consequence_content(
-                equipment_type=equipment_type,
-                equipment_tag=dev.equipment_tag,
-                deviation=dev.deviation,
-                design_pressure=design_pressure,
-                operating_pressure=operating_pressure,
-                upstream_pressure_psig=node.upstream_pressure_psig,
-                design_temperature=design_temperature,
-                approved_causes=causes,
-                pressure_ratio=pressure_ratio,
-                overpressure_table_context=overpressure_table_context or None,
-                pec_table_context=pec_table_context or None,
-                knowledge_context=knowledge_context if knowledge_context else None,
-                is_special_category=dev.requires_mandatory_sme_review,
-                pid_instruments=pid_instruments or None,
-                pid_summary=node.pid_summary,
-                flow_description=node.flow_description,
-            )
-
-            # Build OverpressureCalc from LLM's table lookup result
-            overpressure_calc: OverpressureCalc | None = None
-            if pressure_ratio is not None and design_pressure and node.upstream_pressure_psig:
-                op = result.get("overpressure_result") or {}
-                overpressure_calc = OverpressureCalc(
-                    max_credible_pressure=node.upstream_pressure_psig,
-                    design_pressure=design_pressure,
-                    ratio=pressure_ratio,
-                    exceeds_2x=bool(op.get("is_vessel_rupture", False)),
-                    assumed_leak_size=op.get("hole_size"),
-                    significance=op.get("significance"),
-                    consequence_description=op.get("consequence_description"),
-                    source=op.get("source"),
-                )
-
-            # Drawing references from node
-            drawing_refs = ([node.drawing_number] if getattr(node, "drawing_number", None) else
-                            result.get("drawing_references", []))
-
-            deviation_consequences_list.append(DeviationConsequencesItem(
+            consequence_item = await consequence_agent.generate_consequence(
+                node=node,
                 deviation_id=dev.deviation_id,
-                equipment_tag=dev.equipment_tag,
-                deviation=dev.deviation,
                 guideword=dev.guideword.value,
                 parameter=dev.parameter.value,
-                causes=causes,
-                drawing_references=drawing_refs,
-                intermediate_consequences=result.get("intermediate_consequences", []),
-                consequences=result.get("consequences", []),
-                scenario_comments=result.get("scenario_comments"),
-                consequence_category=result.get("consequence_category"),
-                pec=result.get("pec"),
-                current_risk=result.get("current_risk"),
-                overpressure_calc=overpressure_calc,
-            ))
-        except Exception:
-            # LLM failure: return ratio-only overpressure calc for SME to review
-            fallback_calc: OverpressureCalc | None = None
-            if pressure_ratio is not None and design_pressure and node.upstream_pressure_psig:
-                fallback_calc = OverpressureCalc(
-                    max_credible_pressure=node.upstream_pressure_psig,
-                    design_pressure=design_pressure,
-                    ratio=pressure_ratio,
-                    exceeds_2x=False,
-                    assumed_leak_size=None,
-                    significance=None,
-                    consequence_description=None,
-                    source=None,
-                )
+                deviation_description=dev.deviation,
+                equipment=equipment,
+                approved_causes=causes,
+                pid_instruments=pid_instruments,
+            )
+            deviation_consequences_list.append(consequence_item)
+
+        except Exception as e:
+            # Agent failure: create minimal item for SME review
+            print(f"[ConsequenceAgent] Error for {dev.equipment_tag} - {dev.deviation}: {e}")
             deviation_consequences_list.append(DeviationConsequencesItem(
                 deviation_id=dev.deviation_id,
                 equipment_tag=dev.equipment_tag,
@@ -629,7 +545,10 @@ async def generate_consequences(request: GenerateConsequencesRequest):
                 parameter=dev.parameter.value,
                 causes=causes,
                 drawing_references=[node.drawing_number] if getattr(node, "drawing_number", None) else [],
-                overpressure_calc=fallback_calc,
+                intermediate_consequences=["⚠️ Agent error - SME review required"],
+                consequences=["Unable to generate - please review manually"],
+                scenario_comments=f"ConsequenceAgent encountered an error: {str(e)}",
+                consequence_category="PAF",
             ))
 
     # Store pending consequences on node for later retrieval
@@ -639,7 +558,7 @@ async def generate_consequences(request: GenerateConsequencesRequest):
     await cosmos_client.save_node(node_data)
 
     return GenerateConsequencesResponse(
-        message=f"Generated consequences for {len(deviation_consequences_list)} deviations",
+        message=f"Generated consequences for {len(deviation_consequences_list)} deviations using ConsequenceAgent",
         node_id=request.node_id,
         deviation_consequences=deviation_consequences_list,
     )
