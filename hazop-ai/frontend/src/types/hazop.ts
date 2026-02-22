@@ -375,6 +375,10 @@ export interface DeviationSafeguards {
   pec: string | null;
   current_risk: string | null;
   safeguards: SafeguardReview[];
+  /** Auto-calculated: max(1, 5 - safeguard_count). SME-editable (1–5). */
+  probability: number;
+  /** Residual Risk Level from OOG matrix (A–E). Auto-calculated, SME-editable. */
+  rl: string | null;
 }
 
 export interface SafeguardsGenerationResponse {

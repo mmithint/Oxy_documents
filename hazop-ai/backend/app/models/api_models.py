@@ -302,6 +302,8 @@ class DeviationSafeguardsItem(BaseModel):
     pec: Optional[str] = None                    # "PEC-1", "PEC-2", "PEC-3", "PEC-4"
     current_risk: Optional[str] = None           # e.g. "C5", "D4"
     safeguards: list[SafeguardReviewItem] = Field(default_factory=list)
+    probability: int = 1                         # Auto-calculated: max(1, 5 - safeguard_count), SME-editable
+    rl: Optional[str] = None                     # Residual risk level: "A"–"E" from OOG matrix, SME-editable
 
 
 class GenerateSafeguardsRequest(BaseModel):

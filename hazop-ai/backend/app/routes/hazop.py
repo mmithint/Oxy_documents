@@ -32,6 +32,7 @@ from app.services.deviation_generator import deviation_generator
 from app.services.risk_engine import risk_engine, RISK_LEVEL_DEFINITIONS
 from app.services.openai_service import openai_service
 from app.services.knowledge_service import knowledge_service
+from app.services.mitigation_agent import mitigation_agent
 from app.database.cosmos_client import cosmos_client
 
 router = APIRouter()
@@ -643,13 +644,6 @@ async def generate_safeguards(request: GenerateSafeguardsRequest):
         node, selected_deviation_types=request.selected_deviation_types
     )
 
-    # Retrieve CME/PR classification context from HSE Risk Assessment doc (once for all deviations)
-    cme_knowledge_context = ""
-    try:
-        cme_knowledge_context = await knowledge_service.retrieve_cme_safeguard_context()
-    except Exception:
-        pass
-
     for dev in deviations:
         # Find equipment for this deviation
         equipment = None
@@ -702,54 +696,6 @@ async def generate_safeguards(request: GenerateSafeguardsRequest):
                                 "pid_reference": inst.pid_reference,
                             })
 
-        # Drawing references from node
-        drawing_refs = [node.drawing_number] if getattr(node, "drawing_number", None) else []
-
-        # LLM: generate enriched safeguards with PR classification from HSE doc
-        try:
-            result = await openai_service.generate_safeguard_content(
-                equipment_type=equipment_type,
-                equipment_tag=dev.equipment_tag,
-                deviation=dev.deviation,
-                approved_causes=approved_causes,
-                approved_consequences=approved_cons,
-                pid_instruments=pid_instruments,
-                cme_knowledge_context=cme_knowledge_context or None,
-            )
-
-            safeguard_items = [
-                SafeguardReviewItem(
-                    instrument_tag=sg.get("instrument_tag", ""),
-                    description=sg.get("description", ""),
-                    pr_classification=sg.get("pr_classification", "Other"),
-                    mitigation_type=sg.get("mitigation_type"),
-                    pid_reference=sg.get("pid_reference"),
-                    control_category=sg.get("control_category"),
-                    cme_name=sg.get("cme_name"),
-                    cme_id=sg.get("cme_id"),
-                )
-                for sg in result.get("safeguards", [])
-            ]
-        except Exception:
-            # Fallback: create minimal entries from P&ID instruments
-            safeguard_items = [
-                SafeguardReviewItem(
-                    instrument_tag=inst["tag"],
-                    description=(
-                        f"{inst['instrument_type']} ({inst['tag']})"
-                        if inst.get("instrument_type", "Other") != "Other"
-                        else inst["tag"]
-                    ),
-                    pr_classification="Other",
-                    mitigation_type=None,
-                    pid_reference=inst.get("pid_reference"),
-                    control_category=None,
-                    cme_name=None,
-                    cme_id=None,
-                )
-                for inst in pid_instruments
-            ]
-
         # Get intermediate consequences and consequence fields from approved_consequences
         intermediate_cons: list[str] = []
         scenario_comments_val = None
@@ -766,22 +712,85 @@ async def generate_safeguards(request: GenerateSafeguardsRequest):
                 current_risk_val = adata.get("current_risk")
                 break
 
-        deviation_safeguards_list.append(DeviationSafeguardsItem(
-            deviation_id=dev.deviation_id,
-            equipment_tag=dev.equipment_tag,
-            deviation=dev.deviation,
-            guideword=dev.guideword.value,
-            parameter=dev.parameter.value,
-            causes=approved_causes,
-            drawing_references=drawing_refs,
-            intermediate_consequences=intermediate_cons,
-            consequences=approved_cons,
-            scenario_comments=scenario_comments_val,
-            consequence_category=consequence_category_val,
-            pec=pec_val,
-            current_risk=current_risk_val,
-            safeguards=safeguard_items,
-        ))
+        # MitigationAgent: 4-step knowledge-driven safeguard classification
+        if equipment:
+            try:
+                deviation_safeguards_item = await mitigation_agent.generate_safeguards(
+                    node=node,
+                    deviation_id=dev.deviation_id,
+                    guideword=dev.guideword.value,
+                    parameter=dev.parameter.value,
+                    deviation_description=dev.deviation,
+                    equipment=equipment,
+                    approved_causes=approved_causes,
+                    approved_consequences=approved_cons,
+                    intermediate_consequences=intermediate_cons,
+                    scenario_comments=scenario_comments_val,
+                    consequence_category=consequence_category_val,
+                    pid_instruments=pid_instruments,
+                    current_risk=current_risk_val,
+                )
+                # Preserve pec from approved consequences (not generated by agent)
+                deviation_safeguards_item.pec = pec_val
+            except Exception as exc:
+                print(f"[MitigationAgent] Failed for {dev.deviation_id}: {exc}")
+                # Fallback: minimal entries from P&ID instruments
+                drawing_refs = [node.drawing_number] if getattr(node, "drawing_number", None) else []
+                safeguard_items = [
+                    SafeguardReviewItem(
+                        instrument_tag=inst["tag"],
+                        description=(
+                            f"{inst['instrument_type']} ({inst['tag']})"
+                            if inst.get("instrument_type", "Other") != "Other"
+                            else inst["tag"]
+                        ),
+                        pr_classification="Other",
+                        mitigation_type=None,
+                        pid_reference=inst.get("pid_reference"),
+                        control_category=None,
+                        cme_name=None,
+                        cme_id=None,
+                    )
+                    for inst in pid_instruments
+                ]
+                deviation_safeguards_item = DeviationSafeguardsItem(
+                    deviation_id=dev.deviation_id,
+                    equipment_tag=dev.equipment_tag,
+                    deviation=dev.deviation,
+                    guideword=dev.guideword.value,
+                    parameter=dev.parameter.value,
+                    causes=approved_causes,
+                    drawing_references=drawing_refs,
+                    intermediate_consequences=intermediate_cons,
+                    consequences=approved_cons,
+                    scenario_comments=scenario_comments_val,
+                    consequence_category=consequence_category_val,
+                    pec=pec_val,
+                    current_risk=current_risk_val,
+                    safeguards=safeguard_items,
+                    probability=max(1, 5 - len(safeguard_items)),
+                )
+        else:
+            drawing_refs = [node.drawing_number] if getattr(node, "drawing_number", None) else []
+            deviation_safeguards_item = DeviationSafeguardsItem(
+                deviation_id=dev.deviation_id,
+                equipment_tag=dev.equipment_tag,
+                deviation=dev.deviation,
+                guideword=dev.guideword.value,
+                parameter=dev.parameter.value,
+                causes=approved_causes,
+                drawing_references=drawing_refs,
+                intermediate_consequences=intermediate_cons,
+                consequences=approved_cons,
+                scenario_comments=scenario_comments_val,
+                consequence_category=consequence_category_val,
+                pec=pec_val,
+                current_risk=current_risk_val,
+                safeguards=[],
+                probability=4,
+            )
+
+        deviation_safeguards_list.append(deviation_safeguards_item)
 
     # Store pending safeguards on node for later retrieval
     node_data["pending_safeguards_review"] = [

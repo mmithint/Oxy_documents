@@ -46,6 +46,15 @@ function riskBadgeCls(risk: string | null): string {
   return "bg-yellow-50 text-yellow-700 border-yellow-200";
 }
 
+function rlBadgeCls(rl: string | null): string {
+  if (!rl) return "bg-gray-50 text-gray-400 border-dashed border-gray-300";
+  if (rl === "E") return "bg-red-200 text-red-900 border-red-400";
+  if (rl === "D") return "bg-orange-100 text-orange-700 border-orange-300";
+  if (rl === "C") return "bg-yellow-100 text-yellow-700 border-yellow-300";
+  if (rl === "B") return "bg-blue-100 text-blue-700 border-blue-300";
+  return "bg-green-100 text-green-700 border-green-300"; // A
+}
+
 export default function SafeguardsReviewTable({
   nodeId,
   selectedDeviationTypes,
@@ -85,6 +94,11 @@ export default function SafeguardsReviewTable({
   const [cardEditingScenario, setCardEditingScenario] = useState<number | null>(null);
   const [cardEditingPec, setCardEditingPec] = useState<number | null>(null);
   const [cardEditingCurrentRisk, setCardEditingCurrentRisk] = useState<number | null>(null);
+  const [cardEditingProbability, setCardEditingProbability] = useState<number | null>(null);
+  const [cardEditingRl, setCardEditingRl] = useState<number | null>(null);
+
+  const [tableEditingProbability, setTableEditingProbability] = useState<number | null>(null);
+  const [tableEditingRl, setTableEditingRl] = useState<number | null>(null);
 
   const hasTriggered = useRef(false);
   useEffect(() => {
@@ -259,6 +273,26 @@ export default function SafeguardsReviewTable({
     });
     setCardEditingCurrentRisk(null);
     setTableEditingCurrentRisk(null);
+  };
+
+  const handleProbabilityChange = (devIdx: number, value: number) => {
+    setDeviationSafeguards((prev) => {
+      const updated = [...prev];
+      updated[devIdx] = { ...updated[devIdx], probability: value };
+      return updated;
+    });
+    setCardEditingProbability(null);
+    setTableEditingProbability(null);
+  };
+
+  const handleRlChange = (devIdx: number, value: string) => {
+    setDeviationSafeguards((prev) => {
+      const updated = [...prev];
+      updated[devIdx] = { ...updated[devIdx], rl: value };
+      return updated;
+    });
+    setCardEditingRl(null);
+    setTableEditingRl(null);
   };
 
   const handleScenarioChange = (devIdx: number, value: string) => {
@@ -561,6 +595,46 @@ export default function SafeguardsReviewTable({
                         </button>
                       )}
 
+                      {/* Probability badge / editor */}
+                      {cardEditingProbability === devIdx ? (
+                        <div className="flex gap-1">
+                          {[1, 2, 3, 4, 5].map((p) => (
+                            <button key={p} onClick={() => handleProbabilityChange(devIdx, p)}
+                              className="text-[11px] px-2 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-medium">
+                              {p}
+                            </button>
+                          ))}
+                          <button onClick={() => setCardEditingProbability(null)} className="text-[10px] text-gray-400 hover:text-gray-600 ml-1">×</button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setCardEditingProbability(devIdx)}
+                          title="Click to change probability"
+                          className="text-xs px-2 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 font-medium hover:opacity-80">
+                          P={dev.probability ?? 4}
+                        </button>
+                      )}
+
+                      {/* RL badge / editor */}
+                      {cardEditingRl === devIdx ? (
+                        <div className="flex gap-1">
+                          {["A", "B", "C", "D", "E"].map((r) => (
+                            <button key={r} onClick={() => handleRlChange(devIdx, r)}
+                              className={`text-[11px] px-2 py-0.5 rounded border font-bold hover:opacity-80 ${rlBadgeCls(r)}`}>
+                              {r}
+                            </button>
+                          ))}
+                          <button onClick={() => setCardEditingRl(null)} className="text-[10px] text-gray-400 hover:text-gray-600 ml-1">×</button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setCardEditingRl(devIdx)}
+                          title="Click to change residual risk level"
+                          className={`text-xs px-2 py-0.5 rounded border font-bold hover:opacity-80 ${rlBadgeCls(dev.rl ?? null)}`}>
+                          {dev.rl ? `RL: ${dev.rl}` : "RL…"}
+                        </button>
+                      )}
+
                       {dev.drawing_references.length > 0 && (
                         <span className="text-xs text-gray-400 ml-auto">
                           Ref: {dev.drawing_references.join(", ")}
@@ -806,8 +880,14 @@ export default function SafeguardsReviewTable({
                     <th colSpan={2} className="px-3 py-1.5 text-center font-semibold text-gray-600 uppercase tracking-wide border-r border-gray-200 border-b border-gray-200">
                       Tags
                     </th>
-                    <th rowSpan={2} className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap w-24 align-bottom">
+                    <th rowSpan={2} className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap w-24 align-bottom border-r border-gray-200">
                       Current Risk
+                    </th>
+                    <th rowSpan={2} className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap w-20 align-bottom border-r border-gray-200">
+                      Probability
+                    </th>
+                    <th rowSpan={2} className="px-3 py-2.5 text-left font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap w-16 align-bottom">
+                      RL
                     </th>
                   </tr>
                   {/* Row 2 — Tags sub-headers */}
@@ -1097,32 +1177,86 @@ export default function SafeguardsReviewTable({
                             </>
                           )}
 
-                          {/* Current Risk (rowspan on first row, only when no safeguards; else per-deviation last col) */}
+                          {/* Current Risk (rowspan on first row) */}
                           {isFirstRow && (
-                            <td rowSpan={rowCount} className="px-3 py-2.5 align-top">
-                              {isEditingCurrentRisk ? (
-                                <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
-                                  {["C5", "D4", "D5", "E5", "B4", "C4"].map((r) => (
-                                    <button
-                                      key={r}
-                                      onClick={() => handleCurrentRiskChange(devIdx, r)}
-                                      className={`block w-full text-left text-[11px] px-2 py-0.5 rounded border font-medium hover:opacity-80 ${riskBadgeCls(r)}`}
-                                    >
-                                      {r}
-                                    </button>
-                                  ))}
-                                  <button onClick={() => setTableEditingCurrentRisk(null)} className="text-[10px] text-gray-400 hover:text-gray-600 mt-0.5">Cancel</button>
-                                </div>
-                              ) : (
-                                <button
-                                  onClick={() => setTableEditingCurrentRisk(devIdx)}
-                                  title="Click to change current risk"
-                                  className={`text-[11px] px-2 py-1 rounded border font-bold hover:opacity-80 ${riskBadgeCls(dev.current_risk)}`}
-                                >
-                                  {dev.current_risk ?? "Set…"}
-                                </button>
-                              )}
-                            </td>
+                            <>
+                              <td rowSpan={rowCount} className="px-3 py-2.5 align-top border-r border-gray-100">
+                                {isEditingCurrentRisk ? (
+                                  <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
+                                    {["C5", "D4", "D5", "E5", "B4", "C4"].map((r) => (
+                                      <button
+                                        key={r}
+                                        onClick={() => handleCurrentRiskChange(devIdx, r)}
+                                        className={`block w-full text-left text-[11px] px-2 py-0.5 rounded border font-medium hover:opacity-80 ${riskBadgeCls(r)}`}
+                                      >
+                                        {r}
+                                      </button>
+                                    ))}
+                                    <button onClick={() => setTableEditingCurrentRisk(null)} className="text-[10px] text-gray-400 hover:text-gray-600 mt-0.5">Cancel</button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => setTableEditingCurrentRisk(devIdx)}
+                                    title="Click to change current risk"
+                                    className={`text-[11px] px-2 py-1 rounded border font-bold hover:opacity-80 ${riskBadgeCls(dev.current_risk)}`}
+                                  >
+                                    {dev.current_risk ?? "Set…"}
+                                  </button>
+                                )}
+                              </td>
+
+                              {/* Probability (rowspan) */}
+                              <td rowSpan={rowCount} className="px-3 py-2.5 align-top border-r border-gray-100">
+                                {tableEditingProbability === devIdx ? (
+                                  <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
+                                    {[1, 2, 3, 4, 5].map((p) => (
+                                      <button
+                                        key={p}
+                                        onClick={() => handleProbabilityChange(devIdx, p)}
+                                        className="block w-full text-left text-[11px] px-2 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-medium"
+                                      >
+                                        {p}
+                                      </button>
+                                    ))}
+                                    <button onClick={() => setTableEditingProbability(null)} className="text-[10px] text-gray-400 hover:text-gray-600 mt-0.5">Cancel</button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => setTableEditingProbability(devIdx)}
+                                    title="Click to change probability"
+                                    className="text-[11px] px-2 py-1 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 font-bold hover:opacity-80"
+                                  >
+                                    {dev.probability ?? 4}
+                                  </button>
+                                )}
+                              </td>
+
+                              {/* RL (rowspan) */}
+                              <td rowSpan={rowCount} className="px-3 py-2.5 align-top">
+                                {tableEditingRl === devIdx ? (
+                                  <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
+                                    {["A", "B", "C", "D", "E"].map((r) => (
+                                      <button
+                                        key={r}
+                                        onClick={() => handleRlChange(devIdx, r)}
+                                        className={`block w-full text-left text-[11px] px-2 py-0.5 rounded border font-bold hover:opacity-80 ${rlBadgeCls(r)}`}
+                                      >
+                                        {r}
+                                      </button>
+                                    ))}
+                                    <button onClick={() => setTableEditingRl(null)} className="text-[10px] text-gray-400 hover:text-gray-600 mt-0.5">Cancel</button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => setTableEditingRl(devIdx)}
+                                    title="Click to change residual risk level"
+                                    className={`text-[11px] px-2 py-1 rounded border font-bold hover:opacity-80 ${rlBadgeCls(dev.rl ?? null)}`}
+                                  >
+                                    {dev.rl ?? "Set…"}
+                                  </button>
+                                )}
+                              </td>
+                            </>
                           )}
                         </tr>
                       );
