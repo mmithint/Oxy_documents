@@ -201,7 +201,7 @@ OCR Text:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.1,
-                max_tokens=4000,
+                max_tokens=8000,
                 response_format={"type": "json_object"},
             )
 
@@ -394,7 +394,7 @@ DXF Text Entities (grouped by CAD layer, with x/y coordinates):
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.1,
-                max_tokens=4000,
+                max_tokens=8000,
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content
@@ -585,7 +585,7 @@ Rules:
                     {"role": "user", "content": content},
                 ],
                 temperature=0.1,
-                max_tokens=4000,
+                max_tokens=8000,
                 response_format={"type": "json_object"},
             )
 
@@ -670,7 +670,7 @@ Rules:
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.2,
-            max_tokens=3000,
+            max_tokens=6000,
             response_format={"type": "json_object"},
         )
 
@@ -780,7 +780,7 @@ Rules:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=3000,
+            max_tokens=6000,
             response_format={"type": "json_object"},
         )
 
@@ -1046,7 +1046,7 @@ Rules:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,
-                max_tokens=2000,
+                max_tokens=4000,
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content or "{}"
@@ -1249,7 +1249,7 @@ Rules:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=1000,
+            max_tokens=2000,
             response_format={"type": "json_object"},
         )
 
@@ -1324,7 +1324,7 @@ This is safety-critical. Over-estimation is safer than under-estimation.
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,  # Very low temperature for consistent severity estimates
-            max_tokens=1000,
+            max_tokens=2000,
             response_format={"type": "json_object"},
         )
 
