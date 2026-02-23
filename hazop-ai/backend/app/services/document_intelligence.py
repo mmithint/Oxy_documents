@@ -1,16 +1,16 @@
 """
-Azure AI Document Intelligence Service — P&ID Parser
+Azure AI Document Intelligence Service — P&ID Parser (PDF only)
 
-Extracts structured data from P&ID drawings (PDF/images):
+Extracts structured data from P&ID drawings (PDF):
   - Equipment tags and names
   - Instrument tags
   - Text content and layout
   - Table data
 
 Dual Extraction Pipeline:
-  P&ID file (PDF/image)
-      ├── Path 1: Document Intelligence (OCR) → text chunks → LLM text extraction
-      ├── Path 2: Convert to images → GPT-4 Vision → LLM *sees* the diagram
+  P&ID file (PDF)
+      ├── Path 1: Document Intelligence (OCR) → text chunks → Claude text extraction
+      ├── Path 2: Convert PDF pages to images → Claude Vision → LLM *sees* the diagram
       └── Merge both results (deduplicate by tag) → PIDNode
 
   Path 2 (Vision) catches tags that OCR misses:
@@ -32,12 +32,7 @@ from app.models.pid_models import (
     PIDExtractionResult,
     LineConnection, ControlLoop, DeviationLocation,
 )
-from app.services.openai_service import openai_service
-from app.services.dxf_extractor import (
-    extract_entities_from_dxf,
-    format_entities_for_llm,
-    get_layer_summary,
-)
+from app.services.anthropic_pid_service import anthropic_pid_service
 
 settings = get_settings()
 
@@ -46,7 +41,6 @@ settings = get_settings()
 # Tag Pattern Definitions (kept for regex fallback)
 # --------------------------------------------------------------------------
 
-# Equipment: tag prefix → human-readable type
 EQUIPMENT_TAG_PATTERNS: dict[str, str] = {
     r"\bV-\d{3,5}\b": "Separator",
     r"\bD-\d{3,5}\b": "Vessel",
@@ -61,7 +55,6 @@ EQUIPMENT_TAG_PATTERNS: dict[str, str] = {
     r"\bKO-\d{3,5}\b": "Knockout Drum",
 }
 
-# Instrument: tag prefix → human-readable type
 INSTRUMENT_TAG_PATTERNS: dict[str, str] = {
     r"\bPSHH-\d{3,5}\b": "Pressure Switch High High",
     r"\bPSH-\d{3,5}\b": "Pressure Switch High High",
@@ -94,8 +87,6 @@ INSTRUMENT_TAG_PATTERNS: dict[str, str] = {
     r"\bFD-\d{3,5}\b": "Fire Detector",
 }
 
-# Generic catch-all: any 2-5 letter prefix followed by dash and 3-5 digits
-# Used to pick up tags the specific patterns above miss (e.g. new types)
 GENERIC_TAG_PATTERN = r"\b([A-Z]{2,5})-(\d{3,5})\b"
 
 EQUIPMENT_KEYWORD_MAP: dict[str, str] = {
@@ -120,13 +111,11 @@ EQUIPMENT_KEYWORD_MAP: dict[str, str] = {
     "storage tank": "Tank",
 }
 
-# Known equipment tag prefixes (used to distinguish equipment vs instrument
-# in the generic catch-all regex)
 _EQUIPMENT_PREFIXES = {"V", "D", "E", "P", "C", "K", "T", "HDR", "FL", "S", "KO"}
 
 
 class DocumentIntelligenceService:
-    """Parses P&ID drawings using Azure AI Document Intelligence."""
+    """Parses P&ID PDF drawings using Azure AI Document Intelligence + Claude."""
 
     def __init__(self):
         self._client: DocumentIntelligenceClient | None = None
@@ -147,15 +136,15 @@ class DocumentIntelligenceService:
         node_id: str | None = None,
     ) -> PIDExtractionResult:
         """
-        Parse a P&ID file and extract equipment and instruments.
+        Parse a P&ID PDF and extract equipment and instruments.
 
         Dual Extraction Pipeline:
           1. Azure Document Intelligence OCR → text
-          2. Chunk OCR text → LLM text extraction (Path 1)
-          3. Convert file to images → GPT-4 Vision extraction (Path 2)
+          2. Chunk OCR text → Claude text extraction (Path 1)
+          3. Convert PDF pages to images → Claude Vision extraction (Path 2)
           4. Merge results from both paths (deduplicate by tag)
           5. Enrich from tables
-          6. Fallback to regex if both LLM paths fail
+          6. Fallback to regex if both Claude paths fail
         """
         # ---- STEP 1: Azure Document Intelligence OCR ----
         poller = self.client.begin_analyze_document(
@@ -170,12 +159,12 @@ class DocumentIntelligenceService:
         chunks = self._chunk_ocr_text(raw_text, chunk_size=1000, overlap=100)
         self._log_chunks(chunks, source_filename)
 
-        # ---- PATH 1: LLM text extraction (existing) ----
+        # ---- PATH 1: Claude text extraction ----
         llm_result = None
         use_llm = True
 
         try:
-            llm_result = await openai_service.extract_pid_data(chunks, source_filename)
+            llm_result = await anthropic_pid_service.extract_pid_data(chunks, source_filename)
             print(f"[P&ID LLM] Text extraction complete for {source_filename}")
         except Exception as e:
             print(f"[P&ID LLM] Text extraction failed: {e}")
@@ -187,14 +176,14 @@ class DocumentIntelligenceService:
             node_name = llm_result.get("node_name") or self._detect_node_name(raw_text) or f"Node from {source_filename}"
             system = llm_result.get("system") or "Hydrocarbon Processing Systems"
             description = llm_result.get("description") or f"Extracted from {source_filename}"
-            drawing_number = llm_result.get("drawing_number")  # e.g. "APC No. 4020(c)"
+            drawing_number = llm_result.get("drawing_number")
             pid_summary = llm_result.get("pid_summary") or None
             flow_description = llm_result.get("flow_description") or None
             line_connectivity = _parse_line_connectivity(llm_result)
             control_loops = _parse_control_loops(llm_result)
             deviation_locations = _parse_deviation_locations(llm_result)
         else:
-            # Regex fallback for text path
+            # Regex fallback
             text_equipment = self._detect_equipment(raw_text)
             text_instruments = self._detect_instruments(raw_text)
             node_name = self._detect_node_name(raw_text) or f"Node from {source_filename}"
@@ -207,27 +196,23 @@ class DocumentIntelligenceService:
             control_loops = []
             deviation_locations = []
 
-        # ---- PATH 2: Vision extraction (NEW) ----
+        # ---- PATH 2: Claude Vision extraction ----
         vision_equipment: list[Equipment] = []
         vision_instruments: list[Instrument] = []
         vision_result: dict | None = None
 
         try:
-            images_base64 = self._convert_to_images(
-                file_content=file_content,
-                content_type=self._guess_content_type(source_filename),
-            )
+            images_base64 = self._pdf_to_images(file_content)
 
             if images_base64:
-                print(f"[P&ID Vision] Sending {len(images_base64)} page(s) to GPT-4 Vision...")
-                vision_result = await openai_service.extract_pid_data_with_vision(
+                print(f"[P&ID Vision] Sending {len(images_base64)} page(s) to Claude Vision...")
+                vision_result = await anthropic_pid_service.extract_pid_data_with_vision(
                     images_base64=images_base64,
                     source_filename=source_filename,
                     ocr_hint=raw_text[:3000] if raw_text else None,
                 )
                 vision_equipment = self._parse_llm_equipment(vision_result)
                 vision_instruments = self._parse_llm_instruments(vision_result)
-                # Vision has a direct view of the diagram — prefer its results if available
                 if vision_result.get("pid_summary"):
                     pid_summary = vision_result["pid_summary"]
                 if vision_result.get("flow_description"):
@@ -288,7 +273,6 @@ class DocumentIntelligenceService:
         final_eq_tags = sorted({eq.tag for eq in equipment_list})
         final_inst_tags = sorted({inst.tag for inst in instrument_list})
 
-        # Tags added only by vision (not found by text)
         vision_only_eq = sorted(set(vision_eq_tags) - set(text_eq_tags))
         vision_only_inst = sorted(set(vision_inst_tags) - set(text_inst_tags))
 
@@ -331,146 +315,13 @@ class DocumentIntelligenceService:
         )
 
     # ------------------------------------------------------------------
-    # DXF Extraction Path (DWG uploads — no OCR, no Vision)
-    # ------------------------------------------------------------------
-
-    async def parse_pid_from_dxf(
-        self,
-        dxf_content: bytes,
-        source_filename: str,
-        node_id: str | None = None,
-    ) -> PIDExtractionResult:
-        """
-        Parse a DXF file and extract equipment and instruments directly from
-        CAD text entities — no Azure Document Intelligence OCR, no Vision.
-
-        This is used when the user uploads a DWG file.  The DWG is first
-        converted to DXF by ODA File Converter (in the upload route), then
-        this method reads the text entities using ezdxf.
-
-        Why this is better than PDF-OCR for DWG:
-          - Tags are exact strings — no misreads (no "V-l210" for "V-1210")
-          - Spatial coordinates help associate instruments with equipment
-          - Layer names classify entity types before sending to the LLM
-
-        Pipeline:
-          1. ezdxf extracts TEXT/MTEXT entities → [{text, x, y, layer}]
-          2. Entities are formatted and sent to the LLM
-          3. LLM returns equipment[] and instruments[] (same JSON schema as OCR path)
-          4. Build PIDNode and PIDExtractionResult (same structure as parse_pid())
-        """
-        # ---- Step 1: Extract text entities from DXF ----
-        try:
-            entities = extract_entities_from_dxf(dxf_content)
-        except Exception as exc:
-            print(f"[DXF Extract] Entity extraction failed: {exc}")
-            entities = []
-
-        layer_summary = get_layer_summary(entities)
-        print(f"[DXF Extract] Layer summary: {layer_summary}")
-
-        # Format for LLM
-        entity_text = format_entities_for_llm(entities)
-
-        # ---- Step 2: LLM extraction from DXF entities ----
-        llm_result: dict | None = None
-        try:
-            llm_result = await openai_service.extract_pid_from_dxf_entities(
-                entity_text=entity_text,
-                source_filename=source_filename,
-            )
-        except Exception as exc:
-            print(f"[DXF LLM] Failed: {exc}")
-
-        # ---- Step 3: Parse LLM output ----
-        if llm_result:
-            equipment_list = self._parse_llm_equipment(llm_result)
-            instrument_list = self._parse_llm_instruments(llm_result)
-            node_name = (
-                llm_result.get("node_name")
-                or f"Node from {source_filename}"
-            )
-            system = llm_result.get("system") or "Hydrocarbon Processing Systems"
-            description = (
-                llm_result.get("description")
-                or f"Extracted from DWG: {source_filename}"
-            )
-            drawing_number = llm_result.get("drawing_number")
-            pid_summary = llm_result.get("pid_summary") or None
-            flow_description = llm_result.get("flow_description") or None
-            line_connectivity = _parse_line_connectivity(llm_result)
-            control_loops = _parse_control_loops(llm_result)
-            deviation_locations = _parse_deviation_locations(llm_result)
-        else:
-            # Regex fallback on the raw entity text
-            print("[DXF Extract] LLM failed — falling back to regex on entity text")
-            equipment_list = self._detect_equipment(entity_text)
-            instrument_list = self._detect_instruments(entity_text)
-            node_name = f"Node from {source_filename}"
-            system = "Hydrocarbon Processing Systems"
-            description = f"Regex-extracted from DWG: {source_filename}"
-            drawing_number = None
-            pid_summary = None
-            flow_description = None
-            line_connectivity = []
-            control_loops = []
-            deviation_locations = []
-
-        # ---- Step 4: Build node ----
-        auto_node_id = node_id or self._generate_node_id(source_filename)
-
-        node = PIDNode(
-            node_id=auto_node_id,
-            node_name=node_name,
-            system=system,
-            equipment=equipment_list,
-            instruments=instrument_list,
-            pid_drawings=[source_filename],
-            description=description,
-            drawing_number=_normalize_drawing_number(drawing_number),
-            pid_summary=pid_summary,
-            flow_description=flow_description,
-            line_connectivity=line_connectivity,
-            control_loops=control_loops,
-            deviation_locations=deviation_locations,
-        )
-
-        confidence = self._calculate_confidence(equipment_list, instrument_list, entity_text)
-
-        # Build a DXF-specific extraction summary
-        dxf_summary = {
-            "extraction_method": "dxf_entity_extraction",
-            "entity_count": len(entities),
-            "layer_summary": layer_summary,
-            "equipment_count": len(equipment_list),
-            "instrument_count": len(instrument_list),
-            "equipment_tags": sorted({eq.tag for eq in equipment_list}),
-            "instrument_tags": sorted({inst.tag for inst in instrument_list}),
-        }
-
-        return PIDExtractionResult(
-            source_file=source_filename,
-            nodes=[node],
-            raw_text=entity_text[:5000],
-            confidence_score=confidence,
-            ocr_chunks=[entity_text],   # single "chunk" — already structured
-            llm_raw_output=llm_result,
-            vision_raw_output=None,     # no Vision pass for DXF path
-            merge_summary=dxf_summary,
-        )
-
-    # ------------------------------------------------------------------
     # Chunking
     # ------------------------------------------------------------------
 
     def _chunk_ocr_text(
         self, text: str, chunk_size: int = 1000, overlap: int = 100
     ) -> list[str]:
-        """
-        Split OCR text into chunks by paragraph boundaries.
-        Falls back to character-based splitting if paragraphs are too large.
-        Max 20 chunks.
-        """
+        """Split OCR text into chunks by paragraph boundaries. Max 20 chunks."""
         if not text:
             return []
 
@@ -488,7 +339,6 @@ class DocumentIntelligenceService:
             else:
                 if current_chunk:
                     chunks.append(current_chunk)
-                # If a single paragraph exceeds chunk_size, split it
                 if len(para) > chunk_size:
                     start = 0
                     while start < len(para):
@@ -497,7 +347,6 @@ class DocumentIntelligenceService:
                         start = end - overlap
                     current_chunk = ""
                 else:
-                    # Start new chunk with overlap from previous
                     if current_chunk and overlap > 0:
                         overlap_text = current_chunk[-overlap:]
                         current_chunk = f"{overlap_text}\n\n{para}"
@@ -507,11 +356,9 @@ class DocumentIntelligenceService:
         if current_chunk:
             chunks.append(current_chunk)
 
-        # Cap at 20 chunks
         return chunks[:20]
 
     def _log_chunks(self, chunks: list[str], filename: str) -> None:
-        """Print each OCR chunk to console for debugging."""
         print(f"\n{'='*60}")
         print(f"[OCR Chunks] {filename} — {len(chunks)} chunks")
         print(f"{'='*60}")
@@ -527,7 +374,6 @@ class DocumentIntelligenceService:
     # ------------------------------------------------------------------
 
     def _parse_llm_equipment(self, llm_result: dict) -> list[Equipment]:
-        """Build Equipment list from LLM output. Accepts any type string."""
         equipment_list: list[Equipment] = []
         seen_tags: set[str] = set()
 
@@ -538,11 +384,9 @@ class DocumentIntelligenceService:
             seen_tags.add(tag)
 
             raw_type = (item.get("equipment_type") or "Other").strip()
-            # Normalize pipeline / pipe variants → "Piping" (SME-preferred term)
             if raw_type.lower() in ("pipeline", "pipe line", "pipe", "piping", "pipework"):
                 raw_type = "Piping"
 
-            # Parse upstream/downstream equipment lists
             upstream = item.get("upstream_equipment") or []
             downstream = item.get("downstream_equipment") or []
             if isinstance(upstream, str):
@@ -565,7 +409,6 @@ class DocumentIntelligenceService:
         return equipment_list
 
     def _parse_llm_instruments(self, llm_result: dict) -> list[Instrument]:
-        """Build Instrument list from LLM output. Accepts any type string."""
         instrument_list: list[Instrument] = []
         seen_tags: set[str] = set()
 
@@ -575,15 +418,12 @@ class DocumentIntelligenceService:
                 continue
             seen_tags.add(tag)
 
-            # Parse instrument_role — normalize to "cause" or "safeguard"
             raw_role = (item.get("instrument_role") or "").strip().lower()
             instrument_role = raw_role if raw_role in ("cause", "safeguard") else None
 
-            # Parse position — normalize to "upstream" or "downstream"
             raw_position = (item.get("position") or "").strip().lower()
             position = raw_position if raw_position in ("upstream", "downstream") else None
 
-            # Parse line_phase — normalize to "gas" or "liquid"
             raw_phase = (item.get("line_phase") or "").strip().lower()
             line_phase = raw_phase if raw_phase in ("gas", "liquid") else None
 
@@ -604,7 +444,6 @@ class DocumentIntelligenceService:
     # ------------------------------------------------------------------
 
     def _extract_full_text(self, result) -> str:
-        """Extract all text content from Document Intelligence result."""
         if not result or not result.content:
             return ""
         return result.content
@@ -614,7 +453,6 @@ class DocumentIntelligenceService:
     # ------------------------------------------------------------------
 
     def _detect_equipment(self, text: str) -> list[Equipment]:
-        """Detect equipment tags from OCR text using pattern matching."""
         equipment_list: list[Equipment] = []
         seen_tags: set[str] = set()
 
@@ -630,7 +468,6 @@ class DocumentIntelligenceService:
                         equipment_type=eq_type,
                     ))
 
-        # Generic catch-all for equipment tags not in specific patterns
         for prefix, number in re.findall(GENERIC_TAG_PATTERN, text):
             prefix = prefix.upper()
             tag = f"{prefix}-{number}"
@@ -645,7 +482,6 @@ class DocumentIntelligenceService:
         return equipment_list
 
     def _detect_instruments(self, text: str) -> list[Instrument]:
-        """Detect instrument tags from OCR text using pattern matching."""
         instrument_list: list[Instrument] = []
         seen_tags: set[str] = set()
 
@@ -655,14 +491,12 @@ class DocumentIntelligenceService:
                 tag = match.upper()
                 if tag not in seen_tags:
                     seen_tags.add(tag)
-                    associated_eq = self._find_associated_equipment(tag)
                     instrument_list.append(Instrument(
                         tag=tag,
                         instrument_type=inst_type,
-                        associated_equipment_tag=associated_eq,
+                        associated_equipment_tag=self._find_associated_equipment(tag),
                     ))
 
-        # Generic catch-all for instrument tags not matched above
         for prefix, number in re.findall(GENERIC_TAG_PATTERN, text):
             prefix = prefix.upper()
             tag = f"{prefix}-{number}"
@@ -677,7 +511,6 @@ class DocumentIntelligenceService:
         return instrument_list
 
     def _find_equipment_name(self, text: str, tag: str) -> str:
-        """Try to find the descriptive name near an equipment tag."""
         text_lower = text.lower()
         for keyword, eq_type in EQUIPMENT_KEYWORD_MAP.items():
             if keyword in text_lower:
@@ -688,10 +521,6 @@ class DocumentIntelligenceService:
         return tag
 
     def _find_associated_equipment(self, instrument_tag: str) -> str | None:
-        """
-        Try to find associated equipment tag by shared numeric suffix.
-        e.g., PSHH-1210 → V-1210
-        """
         numbers = re.findall(r'\d+', instrument_tag)
         if numbers:
             return numbers[-1]
@@ -702,7 +531,6 @@ class DocumentIntelligenceService:
     # ------------------------------------------------------------------
 
     def _enrich_from_tables(self, result, equipment_list: list[Equipment]) -> None:
-        """Extract design parameters from tables in the document."""
         if not result or not hasattr(result, 'tables') or not result.tables:
             return
 
@@ -730,70 +558,31 @@ class DocumentIntelligenceService:
                                 eq.design_temperature = temp_val
 
     # ------------------------------------------------------------------
-    # Image Conversion (for Vision Extraction)
+    # PDF to Images (for Claude Vision)
     # ------------------------------------------------------------------
 
-    def _convert_to_images(
-        self,
-        file_content: bytes,
-        content_type: str,
-    ) -> list[dict]:
+    def _pdf_to_images(self, file_content: bytes) -> list[dict]:
         """
-        Convert uploaded file to base64-encoded images for GPT-4 Vision.
-
-        For PDFs: renders each page as a PNG image using PyMuPDF.
-        For images: encodes the raw bytes directly to base64.
-
-        Returns list of {"base64": str, "media_type": str}
+        Render each PDF page as a PNG image for Claude Vision.
+        Renders at 2x zoom for better readability of small tags.
+        Returns list of {"base64": str, "media_type": "image/png"}
         """
         images: list[dict] = []
-
-        if content_type == "application/pdf":
-            # PDF → render each page as PNG
-            try:
-                doc = fitz.open(stream=file_content, filetype="pdf")
-                # Limit to first 5 pages to keep token usage reasonable
-                max_pages = min(len(doc), 5)
-                for page_num in range(max_pages):
-                    page = doc.load_page(page_num)
-                    # Render at 2x zoom for better readability of small tags
-                    mat = fitz.Matrix(2.0, 2.0)
-                    pix = page.get_pixmap(matrix=mat)
-                    img_bytes = pix.tobytes("png")
-                    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-                    images.append({
-                        "base64": img_b64,
-                        "media_type": "image/png",
-                    })
-                    print(f"[P&ID Vision] Rendered page {page_num + 1}/{max_pages} ({pix.width}x{pix.height})")
-                doc.close()
-            except Exception as e:
-                print(f"[P&ID Vision] PDF to image conversion failed: {e}")
-        else:
-            # Direct image (PNG, JPEG, TIFF, BMP)
-            media_type = content_type if content_type else "image/png"
-            img_b64 = base64.b64encode(file_content).decode("utf-8")
-            images.append({
-                "base64": img_b64,
-                "media_type": media_type,
-            })
-
+        try:
+            doc = fitz.open(stream=file_content, filetype="pdf")
+            max_pages = min(len(doc), 5)  # Cap at 5 pages
+            for page_num in range(max_pages):
+                page = doc.load_page(page_num)
+                mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for small tag readability
+                pix = page.get_pixmap(matrix=mat)
+                img_bytes = pix.tobytes("png")
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                images.append({"base64": img_b64, "media_type": "image/png"})
+                print(f"[P&ID Vision] Rendered page {page_num + 1}/{max_pages} ({pix.width}x{pix.height})")
+            doc.close()
+        except Exception as e:
+            print(f"[P&ID Vision] PDF to image conversion failed: {e}")
         return images
-
-    def _guess_content_type(self, filename: str) -> str:
-        """Guess content type from filename extension."""
-        lower = filename.lower()
-        if lower.endswith(".pdf"):
-            return "application/pdf"
-        elif lower.endswith(".png"):
-            return "image/png"
-        elif lower.endswith((".jpg", ".jpeg")):
-            return "image/jpeg"
-        elif lower.endswith((".tif", ".tiff")):
-            return "image/tiff"
-        elif lower.endswith(".bmp"):
-            return "image/bmp"
-        return "application/pdf"  # Default assumption
 
     # ------------------------------------------------------------------
     # Merge Logic (Text + Vision Deduplication)
@@ -804,10 +593,7 @@ class DocumentIntelligenceService:
         text_list: list[Equipment],
         vision_list: list[Equipment],
     ) -> list[Equipment]:
-        """
-        Merge equipment from text extraction and vision extraction.
-        Text results are primary; vision adds any tags not already found.
-        """
+        """Text results are primary; vision adds any tags not already found."""
         merged: list[Equipment] = list(text_list)
         seen_tags = {eq.tag.upper() for eq in text_list}
 
@@ -825,23 +611,18 @@ class DocumentIntelligenceService:
         text_list: list[Instrument],
         vision_list: list[Instrument],
     ) -> list[Instrument]:
-        """
-        Merge instruments from text extraction and vision extraction.
-        Text results are primary; vision adds any tags not already found.
-        If vision finds a better associated_equipment_tag, update it.
-        """
+        """Text results are primary; vision adds missing tags and improves associations."""
         merged: list[Instrument] = list(text_list)
         seen_tags = {inst.tag.upper(): i for i, inst in enumerate(text_list)}
 
         for inst in vision_list:
             tag = inst.tag.upper()
             if tag not in seen_tags:
-                # New instrument found by vision — add it
                 seen_tags[tag] = len(merged)
                 merged.append(inst)
                 print(f"[P&ID Merge] Vision added instrument: {tag} ({inst.instrument_type})")
             else:
-                # Already found by text — check if vision has better association
+                # Already found by text — update association if vision found a better one
                 idx = seen_tags[tag]
                 existing = merged[idx]
                 if not existing.associated_equipment_tag and inst.associated_equipment_tag:
@@ -854,7 +635,6 @@ class DocumentIntelligenceService:
     # ------------------------------------------------------------------
 
     def _detect_node_name(self, text: str) -> str | None:
-        """Try to detect the node name from the document text."""
         text_lower = text.lower()
         patterns = [
             r'node[:\s]+(\d+)[.\s]*[-–]\s*(.+?)(?:\n|$)',
@@ -868,7 +648,6 @@ class DocumentIntelligenceService:
         return None
 
     def _generate_node_id(self, filename: str) -> str:
-        """Generate a node ID from filename."""
         numbers = re.findall(r'\d+', filename)
         if numbers:
             return numbers[0]
@@ -880,34 +659,25 @@ class DocumentIntelligenceService:
         instruments: list[Instrument],
         raw_text: str,
     ) -> float:
-        """
-        Calculate extraction confidence score (0-1).
-        Higher confidence = more tags detected and text quality is good.
-        """
         score = 0.0
-
         if len(equipment) >= 3:
             score += 0.4
         elif len(equipment) >= 1:
             score += 0.2
-
         if len(instruments) >= 5:
             score += 0.4
         elif len(instruments) >= 2:
             score += 0.2
         elif len(instruments) >= 1:
             score += 0.1
-
         if len(raw_text) > 500:
             score += 0.2
         elif len(raw_text) > 100:
             score += 0.1
-
         return min(score, 1.0)
 
 
 def _safe_float(value) -> float | None:
-    """Safely convert a value to float, returning None on failure."""
     if value is None:
         return None
     try:
@@ -917,7 +687,6 @@ def _safe_float(value) -> float | None:
 
 
 def _parse_line_connectivity(llm_result: dict) -> list[LineConnection]:
-    """Parse line_connectivity from LLM JSON output into LineConnection objects."""
     items: list[LineConnection] = []
     for lc in llm_result.get("line_connectivity", []):
         if not isinstance(lc, dict):
@@ -938,7 +707,6 @@ def _parse_line_connectivity(llm_result: dict) -> list[LineConnection]:
 
 
 def _parse_control_loops(llm_result: dict) -> list[ControlLoop]:
-    """Parse control_loops from LLM JSON output into ControlLoop objects."""
     items: list[ControlLoop] = []
     for cl in llm_result.get("control_loops", []):
         if not isinstance(cl, dict):
@@ -961,7 +729,6 @@ def _parse_control_loops(llm_result: dict) -> list[ControlLoop]:
 
 
 def _parse_deviation_locations(llm_result: dict) -> list[DeviationLocation]:
-    """Parse deviation_locations from LLM JSON output into DeviationLocation objects."""
     items: list[DeviationLocation] = []
     for dl in llm_result.get("deviation_locations", []):
         if not isinstance(dl, dict):
@@ -976,18 +743,6 @@ def _parse_deviation_locations(llm_result: dict) -> list[DeviationLocation]:
             location_description=dl.get("location_description"),
         ))
     return items
-
-
-def _normalize_drawing_number(raw: str | None) -> str | None:
-    """
-    Strip trailing revision suffix from an APC / drawing number.
-    e.g. "APC No. 4020(c)" → "APC No. 4020"
-         "DWG-4020-A"      → "DWG-4020-A"  (unchanged)
-    """
-    if not raw:
-        return None
-    cleaned = re.sub(r'\s*\([^)]+\)\s*$', '', raw.strip())
-    return cleaned or None
 
 
 # Module-level singleton

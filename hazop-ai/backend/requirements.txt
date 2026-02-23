@@ -4,21 +4,11 @@ pydantic==2.10.4
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
 python-multipart==0.0.20
-
-# Azure SDKs
+anthropic==0.49.0
 openai==1.58.1
 azure-ai-documentintelligence==1.0.0
 azure-storage-blob==12.24.0
 pymongo==4.10.1
-
-# PDF to image conversion (for GPT-4 Vision extraction)
 PyMuPDF==1.27.1
-
-# DXF parsing (for direct DWG entity extraction — no OCR needed)
-ezdxf==1.3.4
-
-# Utilities
 httpx==0.28.1
-
-# Excel support for knowledge document ingestion
 openpyxl==3.1.5

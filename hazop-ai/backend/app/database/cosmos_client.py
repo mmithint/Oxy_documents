@@ -149,6 +149,13 @@ class MongoDBClient:
         """Retrieve all nodes."""
         return list(self.nodes_collection.find({}, {"_id": 0}))
 
+    async def get_node_by_filename(self, filename: str) -> dict | None:
+        """Retrieve a node by original uploaded filename."""
+        return self.nodes_collection.find_one(
+            {"source_file": filename},
+            {"_id": 0},
+        )
+
     # ------------------------------------------------------------------
     # HAZOP Report Operations
     # ------------------------------------------------------------------

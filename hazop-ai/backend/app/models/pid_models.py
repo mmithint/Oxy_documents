@@ -117,6 +117,7 @@ class PIDNode(BaseModel):
     line_connectivity: list[LineConnection] = Field(default_factory=list, description="Pipe connections between equipment/instruments extracted from P&ID")
     control_loops: list[ControlLoop] = Field(default_factory=list, description="Control loops (measuring element → controller → final element) extracted from P&ID")
     deviation_locations: list[DeviationLocation] = Field(default_factory=list, description="Mapping of equipment to applicable HAZOP deviation types")
+    source_file: Optional[str] = Field(None, description="Original uploaded filename, used for deduplication on re-upload")
 
 
 class PIDExtractionResult(BaseModel):
