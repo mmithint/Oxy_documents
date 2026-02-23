@@ -9,6 +9,7 @@ interface ConsequenceReviewTableProps {
   onBack: () => void;
   initialConsequences: DeviationConsequences[] | null;
   onConsequencesChange: (consequences: DeviationConsequences[]) => void;
+  embedded?: boolean; // hides back button, approval section, and view toggle; forces table view
 }
 
 type ProgressStep = {
@@ -69,6 +70,7 @@ export default function ConsequenceReviewTable({
   onBack,
   initialConsequences,
   onConsequencesChange,
+  embedded = false,
 }: ConsequenceReviewTableProps) {
   const [deviationConsequences, setDeviationConsequences] = useState<DeviationConsequences[]>([]);
   const [loading, setLoading] = useState(false);
@@ -86,8 +88,8 @@ export default function ConsequenceReviewTable({
   const [editingScenario, setEditingScenario] = useState<number | null>(null);
   const [editingCategory, setEditingCategory] = useState<number | null>(null);
 
-  // View mode
-  const [viewMode, setViewMode] = useState<"card" | "table">("card");
+  // View mode — always table when embedded
+  const [viewMode, setViewMode] = useState<"card" | "table">(embedded ? "table" : "card");
 
   // Table-view edit state
   const [tableIntermEdit, setTableIntermEdit] = useState<TableIntermEdit>(null);
@@ -396,7 +398,7 @@ export default function ConsequenceReviewTable({
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {generated && (
+          {generated && !embedded && (
             <div className="flex items-center gap-1 bg-gray-100 rounded-md p-0.5">
               <button
                 onClick={() => setViewMode("card")}
@@ -414,12 +416,14 @@ export default function ConsequenceReviewTable({
               </button>
             </div>
           )}
-          <button
-            onClick={onBack}
-            className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
-          >
-            ← Back to Causes
-          </button>
+          {!embedded && (
+            <button
+              onClick={onBack}
+              className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
+            >
+              ← Back to Causes
+            </button>
+          )}
         </div>
       </div>
 
@@ -494,15 +498,17 @@ export default function ConsequenceReviewTable({
             </div>
           ))}
 
-          <ApprovalSection
-            smeName={smeName}
-            comments={comments}
-            submitting={submitting}
-            onSmeNameChange={setSmeName}
-            onCommentsChange={setComments}
-            onApprove={handleApprove}
-            onBack={onBack}
-          />
+          {!embedded && (
+            <ApprovalSection
+              smeName={smeName}
+              comments={comments}
+              submitting={submitting}
+              onSmeNameChange={setSmeName}
+              onCommentsChange={setComments}
+              onApprove={handleApprove}
+              onBack={onBack}
+            />
+          )}
         </div>
       )}
 
@@ -841,15 +847,17 @@ export default function ConsequenceReviewTable({
             </div>
           </div>
 
-          <ApprovalSection
-            smeName={smeName}
-            comments={comments}
-            submitting={submitting}
-            onSmeNameChange={setSmeName}
-            onCommentsChange={setComments}
-            onApprove={handleApprove}
-            onBack={onBack}
-          />
+          {!embedded && (
+            <ApprovalSection
+              smeName={smeName}
+              comments={comments}
+              submitting={submitting}
+              onSmeNameChange={setSmeName}
+              onCommentsChange={setComments}
+              onApprove={handleApprove}
+              onBack={onBack}
+            />
+          )}
         </div>
       )}
     </div>

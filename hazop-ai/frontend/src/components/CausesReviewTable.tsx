@@ -39,6 +39,7 @@ export default function CausesReviewTable({
   const [progressSteps, setProgressSteps] = useState<ProgressStep[]>([]);
   // Track which deviation instrument panels are expanded
   const [instrPanelOpen, setInstrPanelOpen] = useState<Record<number, boolean>>({});
+  const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
 
   // Auto-trigger generation on mount, or restore from cache
   const hasTriggered = useRef(false);
@@ -241,6 +242,54 @@ export default function CausesReviewTable({
     }
   };
 
+  // Excel export
+  const handleDownloadExcel = async () => {
+    const ExcelJS = (await import("exceljs")).default;
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("Causes Review");
+
+    sheet.columns = [
+      { header: "Equipment Tag", key: "eq", width: 20 },
+      { header: "Deviation", key: "dev", width: 40 },
+      { header: "Guideword", key: "gw", width: 15 },
+      { header: "Parameter", key: "param", width: 20 },
+      { header: "Cause", key: "cause", width: 80 },
+    ];
+
+    const headerRow = sheet.getRow(1);
+    headerRow.font = { bold: true };
+    headerRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8F0FE" } };
+
+    deviationCauses.forEach((dc) => {
+      if (dc.causes.length === 0) {
+        sheet.addRow({ eq: dc.equipment_tag, dev: dc.deviation, gw: dc.guideword, param: dc.parameter, cause: "" });
+      } else {
+        dc.causes.forEach((cause, i) => {
+          sheet.addRow({
+            eq: i === 0 ? dc.equipment_tag : "",
+            dev: i === 0 ? dc.deviation : "",
+            gw: i === 0 ? dc.guideword : "",
+            param: i === 0 ? dc.parameter : "",
+            cause,
+          });
+        });
+      }
+    });
+
+    sheet.eachRow((row) => { row.alignment = { vertical: "top", wrapText: true }; });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "causes_review.xlsx";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   // Group deviations by equipment tag
   const groupedByEquipment: Record<string, { indices: number[] }> = {};
   deviationCauses.forEach((dc, idx) => {
@@ -373,22 +422,97 @@ export default function CausesReviewTable({
     <div className="space-y-4">
       {/* Header */}
       <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <div className="flex items-center justify-between">
-          <div>
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
             <h2 className="text-base font-semibold text-gray-900">Review Causes</h2>
             <p className="text-xs text-gray-500 mt-1">
               Review, edit, add, or remove causes for each deviation. Expand the instrument panel
               to move instruments between included/excluded lists before approving.
             </p>
           </div>
-          <div className="text-xs text-gray-500">
-            {deviationCauses.length} deviations | {deviationCauses.reduce((sum, d) => sum + d.causes.length, 0)} total causes
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {/* View toggle */}
+            <div className="flex items-center gap-0.5 bg-gray-100 rounded-md p-0.5">
+              <button
+                onClick={() => setViewMode("cards")}
+                className={`px-2.5 py-1 text-xs rounded font-medium transition-colors ${
+                  viewMode === "cards" ? "bg-white shadow text-gray-900" : "text-gray-500 hover:text-gray-700"
+                }`}
+              >
+                Cards
+              </button>
+              <button
+                onClick={() => setViewMode("table")}
+                className={`px-2.5 py-1 text-xs rounded font-medium transition-colors ${
+                  viewMode === "table" ? "bg-white shadow text-gray-900" : "text-gray-500 hover:text-gray-700"
+                }`}
+              >
+                Table
+              </button>
+            </div>
+            {/* Excel download */}
+            <button
+              onClick={handleDownloadExcel}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-green-700 bg-green-50 border border-green-200 rounded hover:bg-green-100 transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              Excel
+            </button>
+            <span className="text-xs text-gray-500">
+              {deviationCauses.length} deviations | {deviationCauses.reduce((sum, d) => sum + d.causes.length, 0)} causes
+            </span>
           </div>
         </div>
       </div>
 
-      {/* Causes Table grouped by equipment */}
-      {Object.entries(groupedByEquipment).map(([equipTag, { indices }]) => (
+      {/* Flat Table View */}
+      {viewMode === "table" && (
+        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs border-collapse">
+              <thead>
+                <tr className="bg-gray-50 border-b border-gray-200">
+                  <th className="text-left px-3 py-2 font-semibold text-gray-700 border-r border-gray-100 whitespace-nowrap">Equipment</th>
+                  <th className="text-left px-3 py-2 font-semibold text-gray-700 border-r border-gray-100">Deviation</th>
+                  <th className="text-left px-3 py-2 font-semibold text-gray-700 border-r border-gray-100 whitespace-nowrap">Guideword</th>
+                  <th className="text-left px-3 py-2 font-semibold text-gray-700 border-r border-gray-100 whitespace-nowrap">Parameter</th>
+                  <th className="text-left px-3 py-2 font-semibold text-gray-700">Causes</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {deviationCauses.map((dc) => (
+                  <tr key={dc.deviation_id} className="hover:bg-gray-50 align-top">
+                    <td className="px-3 py-2 font-mono text-gray-700 border-r border-gray-100 whitespace-nowrap">
+                      {dc.equipment_tag}
+                    </td>
+                    <td className="px-3 py-2 text-gray-700 border-r border-gray-100">{dc.deviation}</td>
+                    <td className="px-3 py-2 border-r border-gray-100 whitespace-nowrap">
+                      <span className="px-1.5 py-0.5 bg-blue-50 text-blue-700 rounded text-[11px]">{dc.guideword}</span>
+                    </td>
+                    <td className="px-3 py-2 text-gray-600 border-r border-gray-100 whitespace-nowrap">{dc.parameter}</td>
+                    <td className="px-3 py-2">
+                      {dc.causes.length === 0 ? (
+                        <span className="text-gray-400 italic">No causes</span>
+                      ) : (
+                        <ul className="space-y-0.5 list-disc list-inside text-gray-700">
+                          {dc.causes.map((cause, i) => (
+                            <li key={i}>{cause}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Causes Table grouped by equipment (Cards View) */}
+      {viewMode === "cards" && Object.entries(groupedByEquipment).map(([equipTag, { indices }]) => (
         <div key={equipTag} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
           {/* Equipment Header */}
           <div className="bg-gray-50 px-4 py-2 border-b border-gray-200">

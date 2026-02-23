@@ -10,6 +10,7 @@ interface SafeguardsReviewTableProps {
   instrumentConfig?: InstrumentClassificationConfig;
   initialSafeguards: DeviationSafeguards[] | null;
   onSafeguardsChange: (safeguards: DeviationSafeguards[]) => void;
+  embedded?: boolean; // hides back button, approval section, and view toggle; forces table view
 }
 
 type ProgressStep = {
@@ -63,6 +64,7 @@ export default function SafeguardsReviewTable({
   instrumentConfig,
   initialSafeguards,
   onSafeguardsChange,
+  embedded = false,
 }: SafeguardsReviewTableProps) {
   const [deviationSafeguards, setDeviationSafeguards] = useState<DeviationSafeguards[]>([]);
   const [loading, setLoading] = useState(false);
@@ -73,8 +75,8 @@ export default function SafeguardsReviewTable({
   const [error, setError] = useState("");
   const [progressSteps, setProgressSteps] = useState<ProgressStep[]>([]);
 
-  // View toggle
-  const [viewMode, setViewMode] = useState<"card" | "table">("card");
+  // View toggle — always table when embedded
+  const [viewMode, setViewMode] = useState<"card" | "table">(embedded ? "table" : "card");
 
   // Safeguard cell edit (table + card)
   const [cellEdit, setCellEdit] = useState<CellEdit>(null);
@@ -444,7 +446,7 @@ export default function SafeguardsReviewTable({
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {generated && (
+          {generated && !embedded && (
             <>
               <div className="flex items-center gap-1 bg-gray-100 rounded-md p-0.5">
                 <button
@@ -467,12 +469,14 @@ export default function SafeguardsReviewTable({
               </span>
             </>
           )}
-          <button
-            onClick={onBack}
-            className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
-          >
-            ← Back to Consequences
-          </button>
+          {!embedded && (
+            <button
+              onClick={onBack}
+              className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
+            >
+              ← Back to Consequences
+            </button>
+          )}
         </div>
       </div>
 
@@ -825,16 +829,18 @@ export default function SafeguardsReviewTable({
             </div>
           ))}
 
-          <ApprovalSection
-            smeName={smeName}
-            comments={comments}
-            submitting={submitting}
-            error={error}
-            onSmeNameChange={setSmeName}
-            onCommentsChange={setComments}
-            onApprove={handleApprove}
-            onBack={onBack}
-          />
+          {!embedded && (
+            <ApprovalSection
+              smeName={smeName}
+              comments={comments}
+              submitting={submitting}
+              error={error}
+              onSmeNameChange={setSmeName}
+              onCommentsChange={setComments}
+              onApprove={handleApprove}
+              onBack={onBack}
+            />
+          )}
         </div>
       )}
 
@@ -1288,16 +1294,18 @@ export default function SafeguardsReviewTable({
             </div>
           </div>
 
-          <ApprovalSection
-            smeName={smeName}
-            comments={comments}
-            submitting={submitting}
-            error={error}
-            onSmeNameChange={setSmeName}
-            onCommentsChange={setComments}
-            onApprove={handleApprove}
-            onBack={onBack}
-          />
+          {!embedded && (
+            <ApprovalSection
+              smeName={smeName}
+              comments={comments}
+              submitting={submitting}
+              error={error}
+              onSmeNameChange={setSmeName}
+              onCommentsChange={setComments}
+              onApprove={handleApprove}
+              onBack={onBack}
+            />
+          )}
         </div>
       )}
     </div>

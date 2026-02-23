@@ -4,11 +4,10 @@ import UploadPanel from "../components/UploadPanel";
 import EquipmentReviewTable from "../components/EquipmentReviewTable";
 import DeviationSelector from "../components/DeviationSelector";
 import CausesReviewTable from "../components/CausesReviewTable";
-import ConsequenceReviewTable from "../components/ConsequenceReviewTable";
-import SafeguardsReviewTable from "../components/SafeguardsReviewTable";
+import ConsequencesSafeguardsReviewTable from "../components/ConsequencesSafeguardsReviewTable";
 import HazopTable from "../components/HazopTable";
 import ExtractionDetails from "../components/ExtractionDetails";
-import { generateHAZOP, generateHAZOPQuick, getHAZOPByNode, checkBackendConnection } from "../services/api";
+import { generateHAZOP, getHAZOPByNode, checkBackendConnection } from "../services/api";
 
 // ---------------------------------------------------------------------------
 // Instrument classification helper — reads instrument_role from data
@@ -21,7 +20,7 @@ function isCauseInstrument(inst: Instrument): boolean {
   return inst.instrument_role === "cause";
 }
 
-type WorkflowStep = "upload" | "validate" | "select_deviations" | "review_causes" | "review_consequences" | "review_safeguards" | "generate" | "review";
+type WorkflowStep = "upload" | "validate" | "select_deviations" | "review_causes" | "review_consequences_safeguards" | "report";
 
 export default function Dashboard() {
   const [step, setStep] = useState<WorkflowStep>("upload");
@@ -93,47 +92,33 @@ export default function Dashboard() {
     setStep("review_causes");
   };
 
-  // Step 4: Causes approved → review consequences
+  // Step 4: Causes approved → combined consequences & safeguards review
   const handleCausesApproved = () => {
     // Causes may have been edited → downstream caches are stale
     setCachedConsequences(null);
     setCachedSafeguards(null);
-    setStep("review_consequences");
+    setStep("review_consequences_safeguards");
   };
 
-  // Step 5: Consequences approved → review safeguards
-  const handleConsequencesApproved = () => {
-    // Consequences may have been edited → safeguards cache is stale
-    setCachedSafeguards(null);
-    setStep("review_safeguards");
-  };
-
-  // Step 6: Safeguards approved → ready to generate
-  const handleSafeguardsApproved = () => {
-    setStep("generate");
+  // Step 5: Consequences & safeguards approved → auto-generate HAZOP
+  const handleCombinedApproved = async () => {
+    if (!selectedNode) return;
+    setStep("report");
+    setGenerating(true);
+    setGenMessage("");
+    try {
+      const result = await generateHAZOP(selectedNode.node_id, true, selectedDeviationTypes ?? undefined);
+      setReport(result.report);
+      setGenMessage(result.message);
+    } catch {
+      setGenMessage("HAZOP generation failed. Check Azure configuration.");
+    } finally {
+      setGenerating(false);
+    }
   };
 
   const handleBackToValidation = () => {
     setStep("validate");
-  };
-
-  // Step 4: Generate HAZOP
-  const handleGenerate = async (quick: boolean) => {
-    if (!selectedNode) return;
-    setGenerating(true);
-    setGenMessage("");
-    try {
-      const result = quick
-        ? await generateHAZOPQuick(selectedNode.node_id, selectedDeviationTypes ?? undefined)
-        : await generateHAZOP(selectedNode.node_id, true, selectedDeviationTypes ?? undefined);
-      setReport(result.report);
-      setGenMessage(result.message);
-      setStep("review");
-    } catch {
-      setGenMessage("Generation failed. Check if Azure services are configured.");
-    } finally {
-      setGenerating(false);
-    }
   };
 
   // Refresh report after review actions
@@ -184,37 +169,6 @@ export default function Dashboard() {
             {/* Node Info Card */}
             {selectedNode && (
               <NodeInfoCard node={selectedNode} />
-            )}
-
-            {/* Generate Controls */}
-            {step === "generate" && selectedNode && (
-              <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-3">
-                <h3 className="text-sm font-semibold text-gray-900">Generate HAZOP</h3>
-                {selectedDeviationTypes && (
-                  <p className="text-xs text-gray-500">
-                    {selectedDeviationTypes.length} deviation types selected
-                  </p>
-                )}
-                <button
-                  onClick={() => handleGenerate(false)}
-                  disabled={generating}
-                  className="w-full px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded hover:bg-blue-700 disabled:bg-gray-300"
-                >
-                  {generating ? "Generating..." : "Full HAZOP (AI + Rules)"}
-                </button>
-                <button
-                  onClick={() => handleGenerate(true)}
-                  disabled={generating}
-                  className="w-full px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded hover:bg-gray-200 disabled:bg-gray-50"
-                >
-                  Quick Draft (Rules Only)
-                </button>
-                {genMessage && (
-                  <p className={`text-xs ${genMessage.includes("failed") ? "text-red-600" : "text-green-600"}`}>
-                    {genMessage}
-                  </p>
-                )}
-              </div>
             )}
 
             {/* Report Stats */}
@@ -323,41 +277,40 @@ export default function Dashboard() {
               />
             )}
 
-            {step === "review_consequences" && selectedNode && selectedDeviationTypes && (
-              <ConsequenceReviewTable
+            {step === "review_consequences_safeguards" && selectedNode && selectedDeviationTypes && (
+              <ConsequencesSafeguardsReviewTable
                 nodeId={selectedNode.node_id}
                 selectedDeviationTypes={selectedDeviationTypes}
-                onApproved={handleConsequencesApproved}
+                onApproved={handleCombinedApproved}
                 onBack={() => setStep("review_causes")}
+                instrumentConfig={instrumentConfig ?? undefined}
                 initialConsequences={cachedConsequences}
                 onConsequencesChange={setCachedConsequences}
-              />
-            )}
-
-            {step === "review_safeguards" && selectedNode && selectedDeviationTypes && (
-              <SafeguardsReviewTable
-                nodeId={selectedNode.node_id}
-                selectedDeviationTypes={selectedDeviationTypes}
-                onApproved={handleSafeguardsApproved}
-                onBack={() => setStep("review_consequences")}
-                instrumentConfig={instrumentConfig ?? undefined}
                 initialSafeguards={cachedSafeguards}
                 onSafeguardsChange={setCachedSafeguards}
               />
             )}
 
-            {step === "generate" && (
-              <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
-                <div className="text-gray-400 text-4xl mb-4">HAZOP</div>
-                <h2 className="text-lg font-semibold text-gray-700">Ready to Generate</h2>
-                <p className="text-sm text-gray-500 mt-2">
-                  Click "Full HAZOP" or "Quick Draft" in the left panel to generate the HAZOP report.
-                </p>
-              </div>
-            )}
-
-            {step === "review" && report && (
-              <HazopTable report={report} onRefresh={handleRefresh} />
+            {step === "report" && (
+              generating ? (
+                <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
+                  <div className="flex justify-center mb-4">
+                    <svg className="animate-spin h-10 w-10 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                  </div>
+                  <h2 className="text-lg font-semibold text-gray-700">Generating HAZOP report…</h2>
+                  <p className="text-sm text-gray-500 mt-2">This may take a moment.</p>
+                </div>
+              ) : report ? (
+                <HazopTable report={report} onRefresh={handleRefresh} />
+              ) : (
+                <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
+                  <h2 className="text-lg font-semibold text-red-600">Generation Failed</h2>
+                  <p className="text-sm text-gray-500 mt-2">{genMessage || "An unknown error occurred."}</p>
+                </div>
+              )
             )}
           </div>
         </div>
@@ -553,13 +506,11 @@ function WorkflowSteps({ currentStep }: { currentStep: WorkflowStep }) {
     { key: "validate", label: "2. Validate Equipment" },
     { key: "select_deviations", label: "3. Select Deviations" },
     { key: "review_causes", label: "4. Review Causes" },
-    { key: "review_consequences", label: "5. Review Consequences" },
-    { key: "review_safeguards", label: "6. Review Safeguards" },
-    { key: "generate", label: "7. Generate HAZOP" },
-    { key: "review", label: "8. SME Review" },
+    { key: "review_consequences_safeguards", label: "5. Review Consequences & Safeguards" },
+    { key: "report", label: "6. HAZOP Report" },
   ];
 
-  const stepOrder: WorkflowStep[] = ["upload", "validate", "select_deviations", "review_causes", "review_consequences", "review_safeguards", "generate", "review"];
+  const stepOrder: WorkflowStep[] = ["upload", "validate", "select_deviations", "review_causes", "review_consequences_safeguards", "report"];
   const currentIndex = stepOrder.indexOf(currentStep);
 
   return (
