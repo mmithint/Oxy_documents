@@ -1042,6 +1042,29 @@ async def get_risk_matrix():
     }
 
 
+@router.get("/report/{report_id}/export")
+async def export_hazop_report(report_id: str):
+    """Export HAZOP report as Excel file matching OOG report format."""
+    import io
+    from fastapi.responses import StreamingResponse
+    from app.services.report_exporter import generate_excel
+    from app.models.hazop_models import HAZOPReport
+
+    report_data = await cosmos_client.get_hazop_report(report_id)
+    if not report_data:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    report = HAZOPReport(**report_data)
+    excel_bytes = generate_excel(report)
+
+    filename = f"HAZOP_{report.node_name.replace(' ', '_')}_{report_id[:8]}.xlsx"
+    return StreamingResponse(
+        io.BytesIO(excel_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # --- Helpers ---
 
 def _deviation_requires_action(deviation_data: dict) -> bool:

@@ -342,3 +342,10 @@ export async function approveSafeguards(
   });
   return res.data;
 }
+
+export async function exportReport(reportId: string): Promise<Blob> {
+  const res = await api.get(`/hazop/report/${reportId}/export`, {
+    responseType: "blob",
+  });
+  return res.data;
+}

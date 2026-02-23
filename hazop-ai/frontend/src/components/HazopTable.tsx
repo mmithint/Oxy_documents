@@ -3,6 +3,7 @@ import type { HAZOPReport, Deviation } from "../types/hazop";
 import RiskBadge from "./RiskBadge";
 import StatusBadge from "./StatusBadge";
 import ApprovalControls from "./ApprovalControls";
+import { exportReport } from "../services/api";
 
 interface HazopTableProps {
   report: HAZOPReport;
@@ -13,6 +14,24 @@ export default function HazopTable({ report, onRefresh }: HazopTableProps) {
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [filterEquipment, setFilterEquipment] = useState<string>("all");
   const [filterStatus, setFilterStatus] = useState<string>("all");
+  const [exporting, setExporting] = useState(false);
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const blob = await exportReport(report.report_id!);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `HAZOP_${report.node_name.replace(/\s+/g, "_")}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // silently ignore; could add toast here
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // Get unique equipment tags for filter
   const equipmentTags = [...new Set(report.deviations.map((d) => d.equipment_tag))];
@@ -45,6 +64,13 @@ export default function HazopTable({ report, onRefresh }: HazopTableProps) {
             <span className="text-xs text-gray-500">
               {report.deviations.filter((d) => d.status === "approved").length}/{report.deviations.length} approved
             </span>
+            <button
+              onClick={handleExport}
+              disabled={exporting}
+              className="px-3 py-1.5 text-xs font-medium text-white bg-green-600 hover:bg-green-700 rounded disabled:opacity-50 flex items-center gap-1.5"
+            >
+              {exporting ? "Exporting..." : "⬇ Export to Excel"}
+            </button>
           </div>
         </div>
 
