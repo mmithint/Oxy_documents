@@ -263,6 +263,7 @@ export interface DeviationCauses {
   guideword: string;
   parameter: string;
   causes: string[];
+  pid_cause_instruments: InstrumentContext[];
   included_instruments: InstrumentContext[];
   excluded_instruments: InstrumentContext[];
 }
@@ -327,6 +328,7 @@ export interface DeviationConsequences {
   guideword: string;
   parameter: string;
   causes: string[];
+  pid_cause_instruments: InstrumentContext[];
   drawing_references: string[];
   intermediate_consequences: string[];
   consequences: string[];
@@ -367,6 +369,7 @@ export interface DeviationSafeguards {
   guideword: string;
   parameter: string;
   causes: string[];
+  pid_cause_instruments: InstrumentContext[];
   drawing_references: string[];
   intermediate_consequences: string[];
   consequences: string[];

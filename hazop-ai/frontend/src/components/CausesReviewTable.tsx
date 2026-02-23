@@ -500,6 +500,25 @@ export default function CausesReviewTable({
                     </div>
                   </div>
 
+                  {/* P&ID Cause Instruments — instruments specifically linked to this deviation */}
+                  {dc.pid_cause_instruments.length > 0 && (
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] text-indigo-600 font-medium whitespace-nowrap">
+                        P&ID cause instruments:
+                      </span>
+                      {dc.pid_cause_instruments.map((inst) => (
+                        <span
+                          key={inst.tag}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-50 border border-indigo-100 rounded text-[11px] text-indigo-700"
+                          title={inst.reason}
+                        >
+                          <span className="font-mono font-medium">{inst.tag}</span>
+                          <span className="text-indigo-400">{inst.instrument_type}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
                   {/* Per-Deviation Instrument Panel */}
                   {hasInstruments && (
                     <div className="mt-3 border border-gray-200 rounded-lg overflow-hidden">

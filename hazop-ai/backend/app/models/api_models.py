@@ -133,6 +133,7 @@ class DeviationCausesItem(BaseModel):
     guideword: str
     parameter: str
     causes: list[str]
+    pid_cause_instruments: list[InstrumentContextItem] = []
     included_instruments: list[InstrumentContextItem] = []
     excluded_instruments: list[InstrumentContextItem] = []
 
@@ -230,6 +231,7 @@ class DeviationConsequencesItem(BaseModel):
     guideword: str
     parameter: str
     causes: list[str]                  # from SME-approved causes
+    pid_cause_instruments: list[InstrumentContextItem] = []
     drawing_references: list[str] = Field(default_factory=list)
     intermediate_consequences: list[str] = Field(default_factory=list)
     consequences: list[str] = Field(default_factory=list)
@@ -294,6 +296,7 @@ class DeviationSafeguardsItem(BaseModel):
     guideword: str
     parameter: str
     causes: list[str]
+    pid_cause_instruments: list[InstrumentContextItem] = []
     drawing_references: list[str] = Field(default_factory=list)
     intermediate_consequences: list[str] = Field(default_factory=list)
     consequences: list[str] = Field(default_factory=list)

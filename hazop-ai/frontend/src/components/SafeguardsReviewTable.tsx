@@ -943,6 +943,21 @@ export default function SafeguardsReviewTable({
                                     </li>
                                   ))}
                                 </ul>
+                                {/* P&ID cause instruments */}
+                                {dev.pid_cause_instruments?.length > 0 && (
+                                  <div className="mt-1.5 flex flex-wrap gap-1">
+                                    {dev.pid_cause_instruments.map((inst) => (
+                                      <span
+                                        key={inst.tag}
+                                        className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-indigo-50 border border-indigo-100 rounded text-[10px] text-indigo-700"
+                                        title={inst.reason}
+                                      >
+                                        <span className="font-mono font-medium">{inst.tag}</span>
+                                        <span className="text-indigo-400">{inst.instrument_type}</span>
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
                               </td>
 
                               {/* Drawing / Reference */}

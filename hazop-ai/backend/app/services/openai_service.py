@@ -687,18 +687,22 @@ Rules:
                 c["description"] if isinstance(c, dict) else str(c)
                 for c in raw_causes
             ]
+            result["related_instrument_tags"] = []
         else:
             # Standard deviations: keep only causes whose tag is in the valid instrument list
             valid_tags = {
                 inst.get("tag", "").upper()
                 for inst in (node_instruments or [])
             }
-            result["causes"] = [
-                c["description"]
-                for c in raw_causes
+            valid_cause_items = [
+                c for c in raw_causes
                 if isinstance(c, dict)
                 and c.get("tag", "").upper() in valid_tags
             ]
+            result["causes"] = [c["description"] for c in valid_cause_items]
+            result["related_instrument_tags"] = list({
+                c.get("tag") for c in valid_cause_items if c.get("tag")
+            })
 
         return result
 

@@ -440,6 +440,7 @@ async def generate_causes(request: GenerateCausesRequest):
                     guideword=dev.guideword.value,
                     parameter=dev.parameter.value,
                     causes=dev.causes,  # ontology causes only
+                    pid_cause_instruments=[],
                     included_instruments=dev_included,
                     excluded_instruments=dev_excluded,
                 ))
@@ -469,12 +470,25 @@ async def generate_causes(request: GenerateCausesRequest):
             # Causes are already validated and flattened to plain strings
             # inside generate_deviation_content() — no further filtering needed.
             llm_causes = result.get("causes", [])
+            related_tags = {t.upper() for t in result.get("related_instrument_tags", [])}
+
+            pid_cause_instrs = [
+                InstrumentContextItem(
+                    tag=d["tag"],
+                    instrument_type=d["instrument_type"],
+                    reason="P&ID instrument identified as cause for this deviation",
+                    pid_reference=None,
+                )
+                for d in equipment_instrument_dicts
+                if d["tag"].upper() in related_tags
+            ]
 
             # Use only LLM (P&ID-grounded) causes, no ontology merge
             merged_causes = llm_causes
         except Exception:
             # LLM failure: return empty list (no fallback to ontology)
             merged_causes = []
+            pid_cause_instrs = []
 
         deviation_causes_list.append(DeviationCausesItem(
             deviation_id=dev.deviation_id,
@@ -483,6 +497,7 @@ async def generate_causes(request: GenerateCausesRequest):
             guideword=dev.guideword.value,
             parameter=dev.parameter.value,
             causes=merged_causes,
+            pid_cause_instruments=pid_cause_instrs,
             included_instruments=dev_included,
             excluded_instruments=dev_excluded,
         ))
@@ -533,6 +548,12 @@ async def generate_consequences(request: GenerateConsequencesRequest):
     approved_causes = node_data.get("approved_causes", {})
     deviation_consequences_list: list[DeviationConsequencesItem] = []
 
+    # Build lookup: (equipment_tag, deviation) → pid_cause_instruments from causes step
+    cause_instruments_lookup: dict[tuple, list[dict]] = {
+        (item.get("equipment_tag"), item.get("deviation")): item.get("pid_cause_instruments", [])
+        for item in node_data.get("pending_causes_review", [])
+    }
+
     # Rebuild the list of deviations from approved_causes
     deviations = deviation_generator.generate_deviations_for_node(
         node, selected_deviation_types=request.selected_deviation_types
@@ -580,11 +601,19 @@ async def generate_consequences(request: GenerateConsequencesRequest):
                 approved_causes=causes,
                 pid_instruments=pid_instruments,
             )
+            consequence_item.pid_cause_instruments = [
+                InstrumentContextItem(**d)
+                for d in cause_instruments_lookup.get((dev.equipment_tag, dev.deviation), [])
+            ]
             deviation_consequences_list.append(consequence_item)
 
         except Exception as e:
             # Agent failure: create minimal item for SME review
             print(f"[ConsequenceAgent] Error for {dev.equipment_tag} - {dev.deviation}: {e}")
+            fallback_pid_cause_instrs = [
+                InstrumentContextItem(**d)
+                for d in cause_instruments_lookup.get((dev.equipment_tag, dev.deviation), [])
+            ]
             deviation_consequences_list.append(DeviationConsequencesItem(
                 deviation_id=dev.deviation_id,
                 equipment_tag=dev.equipment_tag,
@@ -592,6 +621,7 @@ async def generate_consequences(request: GenerateConsequencesRequest):
                 guideword=dev.guideword.value,
                 parameter=dev.parameter.value,
                 causes=causes,
+                pid_cause_instruments=fallback_pid_cause_instrs,
                 drawing_references=[node.drawing_number] if getattr(node, "drawing_number", None) else [],
                 intermediate_consequences=["⚠️ Agent error - SME review required"],
                 consequences=["Unable to generate - please review manually"],
@@ -638,6 +668,12 @@ async def generate_safeguards(request: GenerateSafeguardsRequest):
     node = PIDNode(**node_data)
     approved_consequences = node_data.get("approved_consequences", {})
     deviation_safeguards_list: list[DeviationSafeguardsItem] = []
+
+    # Build lookup: (equipment_tag, deviation) → pid_cause_instruments from causes step
+    cause_instruments_lookup: dict[tuple, list[dict]] = {
+        (item.get("equipment_tag"), item.get("deviation")): item.get("pid_cause_instruments", [])
+        for item in node_data.get("pending_causes_review", [])
+    }
 
     # Rebuild deviations using the same selected types as the user chose
     deviations = deviation_generator.generate_deviations_for_node(
@@ -732,6 +768,10 @@ async def generate_safeguards(request: GenerateSafeguardsRequest):
                 )
                 # Preserve pec from approved consequences (not generated by agent)
                 deviation_safeguards_item.pec = pec_val
+                deviation_safeguards_item.pid_cause_instruments = [
+                    InstrumentContextItem(**d)
+                    for d in cause_instruments_lookup.get((dev.equipment_tag, dev.deviation), [])
+                ]
             except Exception as exc:
                 print(f"[MitigationAgent] Failed for {dev.deviation_id}: {exc}")
                 # Fallback: minimal entries from P&ID instruments
@@ -760,6 +800,10 @@ async def generate_safeguards(request: GenerateSafeguardsRequest):
                     guideword=dev.guideword.value,
                     parameter=dev.parameter.value,
                     causes=approved_causes,
+                    pid_cause_instruments=[
+                        InstrumentContextItem(**d)
+                        for d in cause_instruments_lookup.get((dev.equipment_tag, dev.deviation), [])
+                    ],
                     drawing_references=drawing_refs,
                     intermediate_consequences=intermediate_cons,
                     consequences=approved_cons,
@@ -779,6 +823,10 @@ async def generate_safeguards(request: GenerateSafeguardsRequest):
                 guideword=dev.guideword.value,
                 parameter=dev.parameter.value,
                 causes=approved_causes,
+                pid_cause_instruments=[
+                    InstrumentContextItem(**d)
+                    for d in cause_instruments_lookup.get((dev.equipment_tag, dev.deviation), [])
+                ],
                 drawing_references=drawing_refs,
                 intermediate_consequences=intermediate_cons,
                 consequences=approved_cons,

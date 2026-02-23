@@ -114,6 +114,7 @@ async def approve_causes(request: ApproveCausesRequest):
             "causes": item.causes,
             "included_instruments": [i.model_dump() for i in item.included_instruments],
             "excluded_instruments": [i.model_dump() for i in item.excluded_instruments],
+            "pid_cause_instruments": [i.model_dump() for i in item.pid_cause_instruments],
             "approved_by": request.sme_name,
             "approved_at": datetime.utcnow().isoformat(),
         }
